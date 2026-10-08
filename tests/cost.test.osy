@@ -1,0 +1,62 @@
+// WHAT THE RULES COST AS THE TEAM WRITES MORE OF THEM — the rules that run on a record are read on every event and on
+// every watched record each hour, and the rules page reads the same; each test asks once with one rule of the team's
+// and once with eight, and a read per rule turns it red with both numbers. The shop is in shop.test.osy.
+using Osysharp.Identity;
+using Osysharp.Automations;
+using AutomationsKitTests;
+
+/// A rule of the team's that labels a placed job on gloss paper — one condition, one step.
+void LabelRule(int n) {
+  Rule("Gloss " + n, On<JobPlaced>(), [Picked("Paper", ConditionOp.Is, Paper.Gloss.Name)],
+       [Step(Actions.Of(AddLabel), Set("label", "gloss-" + n))]);
+}
+
+/// ⭐ THE RULES THAT RUN ON A RECORD COST THE SAME HOWEVER MANY THE TEAM HAS — their conditions and steps are read once
+/// for all of them, not twice for each.
+[Test(Shop)]
+void the_rules_that_run_on_a_job_are_read_at_once_however_many_the_team_has() {
+  var job = Place("posters");
+  runas (Max) { LabelRule(1); }
+  var one = 0;
+  var rules = 0;
+  runas (Max) {
+    var subject = SubjectFor(Jobs());
+    var mark = Cost.Mark();
+    rules = RulesFor(subject, Job.Single(x => x.Id == job)).Count;
+    one = Cost.StatementsSince(mark);
+  }
+  runas (Max) { for (var i = 2; i <= 8; i++) { LabelRule(i); } }
+  runas (Max) {
+    var subject = SubjectFor(Jobs());
+    var mark = Cost.Mark();
+    var run = RulesFor(subject, Job.Single(x => x.Id == job));
+    var eight = Cost.StatementsSince(mark);
+    Log.Information("RulesFor: " + one + " statements with one rule of the team's, " + eight + " with eight");
+    Assert.Equal(rules + 7, run.Count);
+    // Each rule still carries its own condition and step.
+    Assert.Equal("gloss-8", run.Last().Steps[0].Values[0].Value);
+    Assert.Equal(1, run.Last().Tests.Count);
+    Assert.Equal(one, eight);
+  }
+}
+
+/// ⭐ …AND SO DOES THE RULES PAGE — every line says its conditions and steps, read once for the page.
+[Test(Shop)]
+void the_rules_page_reads_the_same_however_many_rules_the_team_has() {
+  runas (Max) { LabelRule(1); }
+  var one = 0;
+  runas (Max) {
+    var mark = Cost.Mark();
+    RuleLines(Jobs());
+    one = Cost.StatementsSince(mark);
+  }
+  runas (Max) { for (var i = 2; i <= 8; i++) { LabelRule(i); } }
+  runas (Max) {
+    var mark = Cost.Mark();
+    var lines = RuleLines(Jobs());
+    var eight = Cost.StatementsSince(mark);
+    Log.Information("RuleLines: " + one + " statements with one rule of the team's, " + eight + " with eight");
+    Assert.Equal("Add a label: “gloss-8”", lines.Last().Then);
+    Assert.Equal(one, eight);
+  }
+}

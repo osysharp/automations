@@ -1,0 +1,12 @@
+// The producer's test project for Osysharp.Automations — a print shop's jobs: a job is placed, printed and made ready
+// for collection, and rules do the routine work on the way (big runs go on recycled paper, a job ready for two days is
+// labelled uncollected). NOT a helpdesk on purpose: the kit knows nothing of tickets, and this app's rules are about its
+// own `Job` rows and its own `[Action]`s.
+app AutomationsKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Automations@0;
+  use Osysharp.Workflow;
+  use Osysharp.Ui;
+}

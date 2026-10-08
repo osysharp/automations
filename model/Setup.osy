@@ -1,0 +1,341 @@
+namespace Osysharp.Automations;
+
+using Osysharp.Identity;
+
+// THE CONTRACT — what a rule can be about, run on, ask and do, and the little the app says to add to it.
+//
+// ⚑ DERIVED, NOT DECLARED. A kind of record has rules when something HAPPENS to it (an `[Event]` whose record it is) and
+//   something can be DONE to it (an `[Action]` whose subject it is): its triggers are those events, its steps those
+//   actions, and what a rule may ask of it is its own fields — every one the rule's author may read (`Records.Fields`).
+//   The app adds only what is not already in its model: the rules it ships with, conditions it computes, what the
+//   hourly clock looks at, and whose a record is (`AutomationSubject<T>`).
+
+/// Who works with automations: reads the app's rules and the team's, and keeps rules of their own.
+/// `policy RunsAutomations => IsAgent;`
+policy RunsAutomations;
+
+/// Who keeps the TEAM's rules: writes them, copies the app's to change them for everyone, restores and locks them.
+/// `policy ManagesAutomations => IsAdmin;`
+policy ManagesAutomations;
+
+/// `app.Automations = new AutomationsSetup { Subjects = [new JobRules()] };` — only to add to what the model says.
+[AppSetting("Automations")]
+public class AutomationsSetup {
+  /// What the app adds to the rules about a kind of record — one `AutomationSubject<T>` per record type, when it has
+  /// rules of its own to ship, conditions to compute, records for the hourly clock or a holder. None is needed: a record
+  /// that has events and actions has rules.
+  public List<AutomationSubjectBase> Subjects = [];
+  /// How many automations in a row one thing may set off before the chain is stopped (and the record says so).
+  public int MaxChain = 5;
+  /// How long a fire is kept in the history.
+  public TimeSpan KeepFires = TimeSpan.FromDays(90);
+}
+
+/// What the app adds about one kind of record — declare an `AutomationSubject<T>`, never this. Every method runs on the
+/// server, as the app (the kit's own runs are the app's).
+public class AutomationSubjectBase {
+  /// The record type, by full name — `AutomationSubject<T>` answers it.
+  public virtual string Record { get { return ""; } }
+
+  /// Conditions the app COMPUTES — what is not one of the record's own fields (its tags, how long since a reply, a
+  /// value two fields make). Beside the record's own fields, which are offered by themselves; one with a field's name
+  /// takes that field's place.
+  public virtual List<AutomationCondition> Conditions() { return []; }
+
+  /// The rules the app ships with. Each keeps the app's updates until the team or a person copies it to change it.
+  public virtual List<AutomationDefault> Defaults() { return []; }
+
+  /// What the hourly clock looks at — the records an hourly rule (one with "for at least … hours") is checked against.
+  public virtual List<Entity> Watching() { return []; }
+
+  /// Whose record it is, for a person's own rules — a personal rule runs on what its owner holds. None: nobody's, and
+  /// no personal rule runs on it.
+  public virtual Principal? HolderOf(Entity record) { return null; }
+
+  /// Whether a step may be this action — every action done to the record by default. Leave out what makes no sense in
+  /// a rule.
+  public virtual bool Offers(ActionInfo action) { return true; }
+}
+
+/// What the app adds to the rules about its record type `T`:
+///
+///     public class JobRules : AutomationSubject<Job> {
+///       public override List<AutomationDefault> Defaults() { … }       // the rules the shop ships with
+///       public override List<Entity> Watching() { … }                  // what the hourly clock looks at
+///     }
+public class AutomationSubject<T> : AutomationSubjectBase {
+  public string RecordName = typeof(T).FullName;
+  public override string Record { get { return RecordName; } }
+
+  // ── an app's own rule, typed where it is written ───────────────────────────────────────────────────────────────────
+  //
+  // Every part of a rule the app ships is checked by the compiler: the field (`j => j.Stage`), the value against the
+  // field's own type (`JobStage.Ready`, not a string), and each step as the action CALLED (`j => UsePaper(j,
+  // Paper.Recycled)`) — so a misspelt field, a misspelt parameter or a value of the wrong type is an error where the rule
+  // is written, never a rule that silently never holds. A rule a PERSON builds in the app is data, checked when it is
+  // saved.
+
+  /// `Test(j => j.Stage, Is, JobStage.Ready)` — a condition on one of the record's own fields, named by a selector and
+  /// compared with a value of that field's own type: "entity 'Job' has no property 'Stagee'" for a misspelt field, and
+  /// "cannot pass 'string' to parameter 'value' of type 'JobStage'. `JobStage` declares: …" for a value that does not fit.
+  public AutomationTestSpec Test<V>(Func<T, V> field, ConditionOp op, V value) {
+    return new AutomationTestSpec { Condition = OwnField(field), Op = op, Value = Records.Text(field, value) };
+  }
+
+  /// `Test(j => j.StageSince, AtLeast, TimeSpan.FromHours(48))` — how long since one of the record's own times: in its
+  /// stage at least two days.
+  public AutomationTestSpec Test(Func<T, DateTime?> since, ConditionOp op, TimeSpan time) {
+    return new AutomationTestSpec { Condition = OwnField(since), Op = op, Value = Records.Text(since, time) };
+  }
+
+  /// `Test(Held, Is, true)` — a condition the app COMPUTES (one of `Conditions()`), named by the condition itself rather
+  /// than by its key; the value's type says which kind it is — yes or no, a number, words.
+  public AutomationTestSpec Test(AutomationCondition computed, ConditionOp op, bool value) {
+    return Computed(computed, ConditionKind.Flag, op, value ? "true" : "false");
+  }
+  public AutomationTestSpec Test(AutomationCondition computed, ConditionOp op, decimal value) {
+    return Computed(computed, ConditionKind.Number, op, value.ToString());
+  }
+  public AutomationTestSpec Test(AutomationCondition computed, ConditionOp op, string value) {
+    return Computed(computed, computed.Kind == ConditionKind.Choice ? ConditionKind.Choice : ConditionKind.Text, op, value);
+  }
+  /// `Test(InStatus, AtLeast, TimeSpan.FromHours(72))` — a computed "hours since" condition: at least three days.
+  public AutomationTestSpec Test(AutomationCondition computed, ConditionOp op, TimeSpan time) {
+    return Computed(computed, ConditionKind.Hours, op, time.TotalHours.ToString());
+  }
+
+  /// `Run(j => UsePaper(j, Paper.Recycled))` — a step of one of the app's own rules: the `[Action]` called on the rule's
+  /// record, every argument checked where it is written. Its values are fixed then; the record is supplied when it runs.
+  /// `[ActionStep]` makes the SHAPE a compile error too: a call of something that is not an `[Action]`, or a value that
+  /// reads the record (`AddLabel(j, j.Title)` — a rule's values are fixed when it is written).
+  public AutomationStepSpec Run<R>([ActionStep] Func<T, R> step) {
+    return new AutomationStepSpec { Action = Actions.NameOf(step), Values = Actions.ValuesOf(step) };
+  }
+  /// …the same, for an action that answers nothing (`void AddLabel(Job job, string label)`).
+  public AutomationStepSpec Run([ActionStep] Action<T> step) {
+    return new AutomationStepSpec { Action = Actions.NameOf(step), Values = Actions.ValuesOf(step) };
+  }
+
+  // How a condition compares — `Test(j => j.Title, Contains, "urgent")` reads as the rule does.
+  public ConditionOp Is => ConditionOp.Is;
+  public ConditionOp IsNot => ConditionOp.IsNot;
+  public ConditionOp Contains => ConditionOp.Contains;
+  public ConditionOp DoesNotContain => ConditionOp.DoesNotContain;
+  public ConditionOp AtLeast => ConditionOp.AtLeast;
+  public ConditionOp AtMost => ConditionOp.AtMost;
+
+  /// The field a selector names — one of the record's OWN fields, never one reached through a reference.
+  string OwnField<V>(Func<T, V> field) {
+    var name = Records.FieldName(field);
+    if (name.Contains(".")) {
+      throw new ValidationException($"A rule asks about the {NounOf(RecordName)}'s own fields — `{name}` reaches through "
+        + "a reference. Name the reference itself, or compute the value as a condition of your own (`Conditions()`).");
+    }
+    return name;
+  }
+
+  /// A computed condition's test — refused when the value is of another kind than the condition reads.
+  AutomationTestSpec Computed(AutomationCondition computed, ConditionKind kind, ConditionOp op, string value) {
+    if (computed.Kind != kind) {
+      throw new ValidationException($"The condition '{computed.Key}' reads {computed.Kind.Label.ToLower()}, and this rule "
+        + $"compares it with {kind.Label.ToLower()}.");
+    }
+    return new AutomationTestSpec { Condition = computed.Key, Op = op, Value = value };
+  }
+}
+
+/// The rules of a record type the app added nothing to.
+public class RecordSubject : AutomationSubjectBase {
+  public string Name = "";
+  public override string Record { get { return Name; } }
+}
+
+/// What a trigger is stored as — the event's class: `When = On<JobPlaced>()` in an app's rule. Only an event: a rule
+/// `On<Job>()` names a record, which nothing ever raises, so the rule would never run — refused where it is written.
+public string On<TEvent>() where TEvent : Event { return typeof(TEvent).FullName; }
+
+/// What one condition reads. ⚠ Appended, never inserted: an enum is stored by position.
+public enum ConditionKind {
+  /// One of a set — a status, a priority, a queue: `Choices()` offers them, `Value` answers the record's key.
+  [Label("Choice")] Choice,
+  /// Words — a subject line: `Value` answers them.
+  [Label("Text")] Text,
+  /// A number — `Value` answers it in invariant form.
+  [Label("Number")] Number,
+  /// Yes or no — `Is` answers it.
+  [Label("Yes or no")] Flag,
+  /// How long — `Since` answers when it started ("in its status since"); a rule asks for at least, or at most, so many hours.
+  [Label("Hours since")] Hours,
+}
+
+/// How a condition compares. ⚠ Appended, never inserted.
+public enum ConditionOp {
+  [Label("is")] Is,
+  [Label("is not")] IsNot,
+  [Label("contains")] Contains,
+  [Label("does not contain")] DoesNotContain,
+  [Label("is at least")] AtLeast,
+  [Label("is at most")] AtMost,
+}
+
+/// One thing a rule may ask of a record — "Priority", "Hours in its status". The record's own fields are offered by
+/// themselves (`FieldCondition`); a condition the app COMPUTES is a class of its own:
+/// `new TagsAre { Key = "tags", Label = "Tags", Kind = ConditionKind.Text }`.
+public class AutomationCondition {
+  /// What a rule stores it by — a field's name, or lower case, digits, `.`, `-` and `_`; renaming it leaves rules naming
+  /// the old key saying so.
+  public string Key = "";
+  /// What a person reads — "Status".
+  public string Label = "";
+  public ConditionKind Kind = ConditionKind.Choice;
+  /// For a choice: what it can be — each one's stored key and what it reads as.
+  public virtual List<ActionChoice> Choices() { return []; }
+  /// The record's value — a choice's key, the words, a number in invariant form. Read as the app.
+  public virtual string Value(Entity record) { return ""; }
+  /// For yes or no: whether it is so of the record. Read as the app.
+  public virtual bool Is(Entity record) { return false; }
+  /// For hours: when the clock started — none when it has not.
+  public virtual DateTime? Since(Entity record) { return null; }
+}
+
+/// A condition on one of the record's own fields — offered by the kit, never written by an app.
+public class FieldCondition : AutomationCondition {
+  /// The record type, by full name, and the field.
+  public string Record = "";
+  public string Field = "";
+  /// An enum's members; a reference's rows are read only when a person picks from them (`Records.Choices`).
+  public List<ActionChoice> Offered = [];
+  public bool Reference;
+  public override List<ActionChoice> Choices() { return Reference ? Records.Choices(Record, Field) : Offered; }
+  public override string Value(Entity record) { return Records.Value(record, Field); }
+  public override bool Is(Entity record) { return Records.Value(record, Field) == "true"; }
+  public override DateTime? Since(Entity record) { return Records.Time(record, Field); }
+}
+
+/// One of the app's own rules, declared in code — it keeps the app's updates until somebody copies it to change it.
+///
+///     new AutomationDefault {
+///       Key = "rush-weekend", Name = "Weekend orders are rushed", When = On<JobPlaced>(),
+///       If = [Test(j => j.Weekend, Is, true)],          // in the subject's `Defaults()` — field and value checked
+///       Then = [Run(j => SetRush(j, Rush.High))],        // the action called — every argument checked
+///     }
+public class AutomationDefault {
+  /// Its identity — what a copy replaces, and a lock locks. Never reused for another rule.
+  public string Key = "";
+  public string Name = "";
+  /// The event it runs on (`On<JobPlaced>()`) — or none, with `Hourly`.
+  public string When = "";
+  /// Checked by the hourly clock instead of on an event, on what the subject is `Watching()`.
+  public bool Hourly;
+  public List<AutomationTestSpec> If = [];
+  public List<AutomationStepSpec> Then = [];
+  /// The app's own lock: no copy may replace it.
+  public bool Locked;
+  /// Shipped switched off — the team switches it on by copying it.
+  public bool Off;
+}
+
+/// One condition of a rule, as data.
+public class AutomationTestSpec {
+  public string Condition = "";
+  public ConditionOp Op = ConditionOp.Is;
+  public string Value = "";
+}
+
+/// One step of a rule, as data: the action, and the values it is given (the record it runs on is added when it runs).
+/// An app's own rule writes one as the action called (`Run(j => SetRush(j, Rush.High))`); a person's is what they picked.
+public class AutomationStepSpec {
+  public string Action = "";
+  public List<ActionValue> Values = [];
+}
+
+// ── what rules can be about ──────────────────────────────────────────────────────────────────────────────────────────
+
+/// The record types rules can be about, by full name: each the app adds to, and each that some event is about and some
+/// `[Action]` is done to.
+public List<string> SubjectKeys() {
+  List<string> keys = [];
+  foreach (var s in App.Setting<AutomationsSetup>().Subjects) { if (!keys.Contains(s.Record)) { keys.Add(s.Record); } }
+  var catalog = Events.Catalog();
+  foreach (var a in Actions.Catalog()) {
+    var record = a.Subject;
+    if (record == "" || keys.Contains(record)) { continue; }
+    if (catalog.Any(e => IsTriggerOf(e, record))) { keys.Add(record); }
+  }
+  return keys;
+}
+
+/// Whether event `e` is a trigger of rules about `record` — it is about that record type, or a type it derives from.
+/// A rule's own run (`AutomationRan`) is never one.
+public bool IsTriggerOf(EventInfo e, string record) {
+  if (e.About == "" || e.About == "Entity" || e.Type == typeof(AutomationRan).FullName) { return false; }
+  return e.About == record || Records.IsA(record, e.About);
+}
+
+/// What the app adds about `record`, or the record's own rules when it adds nothing.
+public AutomationSubjectBase SubjectOf(string record) {
+  foreach (var s in App.Setting<AutomationsSetup>().Subjects) { if (s.Record == record) { return s; } }
+  return new RecordSubject { Name = record };
+}
+
+/// The subject `key` names — refused, naming the ones there are, when rules cannot be about it.
+public AutomationSubjectBase SubjectFor(string key) {
+  var keys = SubjectKeys();
+  if (keys.Contains(key)) { return SubjectOf(key); }
+  if (keys.Count == 0) {
+    throw new ValidationException("Nothing here has rules yet — a rule is about a record something happens to (an [Event]) "
+      + "and something can be done to (an [Action]).");
+  }
+  throw new ValidationException($"There are no rules about '{key}'. There are about: " + string.Join(", ", keys) + ".");
+}
+
+/// The first kind of record — what a page shows when it names none.
+public string FirstSubject() {
+  var keys = SubjectKeys();
+  return keys.Count == 0 ? "" : keys[0];
+}
+
+/// What a person calls one of `record`'s rows — `Ticket` → "ticket", `PurchaseOrder` → "purchase order".
+public string NounOf(string record) {
+  var bare = record.Contains(".") ? record.Substring(record.LastIndexOf(".") + 1) : record;
+  var words = "";
+  for (var i = 0; i < bare.Length; i = i + 1) {
+    var c = bare.Substring(i, 1);
+    if (i > 0 && c != c.ToLower()) { words = words + " "; }
+    words = words + c.ToLower();
+  }
+  return Translate(words);
+}
+
+/// What a rule may ask of `subject`'s records, as the READER may read them: each of the record's own fields they may read
+/// (never one marked `[NotInRules]`), then the conditions the app computes — one with a field's name in its place. Asking
+/// the fields costs no statement (a reference's rows are read only when a person picks from them).
+public List<AutomationCondition> ConditionsOf(AutomationSubjectBase subject) {
+  List<AutomationCondition> all = [];
+  var record = subject.Record;
+  foreach (var f in Records.Fields(record)) {
+    all.Add(new FieldCondition { Key = f.Name, Label = f.Label, Kind = KindOf(f.Kind), Record = record, Field = f.Name,
+                                 Offered = f.Choices, Reference = f.Target != "" });
+  }
+  foreach (var c in subject.Conditions()) {
+    var key = c.Key;
+    var at = all.FindIndex(x => x.Key == key);
+    if (at >= 0) { all.RemoveAt(at); all.Insert(at, c); } else { all.Add(c); }
+  }
+  return all;
+}
+
+/// How a field is compared in a rule.
+ConditionKind KindOf(RecordFieldKind kind) {
+  if (kind == RecordFieldKind.Text) { return ConditionKind.Text; }
+  if (kind == RecordFieldKind.Number) { return ConditionKind.Number; }
+  if (kind == RecordFieldKind.Flag) { return ConditionKind.Flag; }
+  if (kind == RecordFieldKind.Time) { return ConditionKind.Hours; }
+  return ConditionKind.Choice;
+}
+
+/// The events rules about `subject` run on — its triggers, from the app's catalogue of events.
+public List<EventInfo> TriggersOf(AutomationSubjectBase subject) {
+  var record = subject.Record;
+  return Events.Catalog().Where(e => IsTriggerOf(e, record)).ToList();
+}

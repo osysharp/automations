@@ -1,0 +1,395 @@
+namespace Osysharp.Automations;
+
+using Osysharp.Ui;
+
+// THE RULES PAGE — every rule that runs on the app's records, in the order they run: the app's own (and the copy that
+// replaces each, the team's or the reader's), then the team's, then the reader's own. A rule is read as a sentence —
+// when, if, then — and changed in an editor that offers only what can be: the app's triggers, its conditions with the
+// comparisons each takes, and its `[Action]`s with the choices each parameter offers.
+
+/// The Automations part of the app's settings area — for everybody who works with them. Discovered, never wired.
+public class AutomationSettingsSections : ISettingsProvider {
+  public SettingsLink[] Sections() {
+    return [
+      new SettingsLink { Label = "Automations", To = "/settings/automations", Group = "Automation", Icon = Icons.Bolt, Order = 60,
+                         Shown = RunsAutomations, Hint = "Rules that do the routine work when something happens." },
+    ];
+  }
+}
+
+/// The rules, as a settings page.
+[Page("/settings/automations")] [Layout(SettingsFrame)] [Authorize(RunsAutomations)] [Render(CSR)] [Title("Automations")]
+public component AutomationsSettings() { render { AutomationRules(); } }
+
+/// The rules of `subject` (the app's first when none is named), the editor, and what ran lately.
+[Composable]
+public component AutomationRules(string subject = "") {
+  string key = "";
+  string noun = "record";
+  List<RuleLine> lines = [];
+  List<FireLine> fires = [];
+  List<ActionChoice> triggers = [];
+  List<string> whenKeys = [];
+  List<ConditionInfo> conditions = [];
+  List<ActionInfo> actions = [];
+  bool manager = false;
+  string notice = "";
+  string problem = "";
+
+  // the editor
+  bool editing = false;
+  Guid? editingId = null;
+  string replaces = "";
+  string name = "";
+  bool teamRule = true;
+  string when = "";
+  bool off = false;
+  List<AutomationTestSpec> tests = [];
+  List<AutomationStepSpec> steps = [];
+  List<string> testWords = [];
+  List<string> stepWords = [];
+  // a condition being added
+  bool addingTest = false;
+  string testKey = "";
+  ConditionOp testOp = ConditionOp.Is;
+  string testValue = "";
+  // a step being added
+  bool addingStep = false;
+  string stepAction = "";
+  List<ActionParameter> stepParams = [];
+  List<ActionChoice> firstChoices = [];
+  List<ActionChoice> secondChoices = [];
+  string firstValue = "";
+  string secondValue = "";
+
+  on mount { Load(); }
+
+  action Load() {
+    key = subject != "" ? subject : FirstSubject();
+    noun = NounOf(key);
+    lines = RuleLines(key);
+    fires = RecentFires(key);
+    triggers = TriggerChoices(key);
+    var keys = triggers.Select(t => t.Key).ToList();
+    keys.Add("@hourly");
+    whenKeys = keys;
+    conditions = ConditionChoices(key);
+    actions = StepChoices(key).Where(a => a.Parameters.Count(p => !p.Subject) <= 2).ToList();
+    manager = KeepsTeamRules();
+  }
+
+  action Open(RuleLine line) {
+    var d = DraftOf(key, line.Key);
+    editingId = d.Id; replaces = d.Replaces; name = d.Name; teamRule = d.Layer == AutomationLayer.Team; off = d.Off;
+    when = d.Hourly ? "@hourly" : d.When;
+    tests = d.Tests; steps = d.Steps;
+    Reword();
+    problem = ""; addingTest = false; addingStep = false; editing = true;
+  }
+  action New() {
+    editingId = null; replaces = ""; name = ""; teamRule = manager; off = false;
+    when = triggers.Count > 0 ? triggers[0].Key : "@hourly";
+    tests = []; steps = []; testWords = []; stepWords = [];
+    problem = ""; addingTest = false; addingStep = false; editing = true;
+  }
+  action Close() { editing = false; }
+
+  action Reword() {
+    testWords = tests.Select(t => TestLine(key, t)).ToList();
+    stepWords = steps.Select(s => StepLine(s)).ToList();
+  }
+
+  action StartTest() { addingTest = !addingTest; testKey = ""; testValue = ""; testOp = ConditionOp.Is; }
+  action AddTest() {
+    if (testKey == "") { problem = "Choose what it asks."; return; }
+    var next = tests.ToList();
+    next.Add(new AutomationTestSpec { Condition = testKey, Op = testOp, Value = testValue });
+    tests = next;
+    addingTest = false;
+    Reword();
+  }
+  action DropTest(int i) { var next = tests.ToList(); next.RemoveAt(i); tests = next; Reword(); }
+
+  action StartStep() { addingStep = !addingStep; stepAction = ""; stepParams = []; firstValue = ""; secondValue = ""; }
+  action PickAction() {
+    var info = actions.FirstOrDefault(a => a.Name == stepAction);
+    stepParams = info == null ? [] : info!.Parameters.Where(p => !p.Subject).ToList();
+    firstChoices = stepParams.Count > 0 ? ChoicesOf(stepAction, stepParams[0]) : [];
+    secondChoices = stepParams.Count > 1 ? ChoicesOf(stepAction, stepParams[1]) : [];
+    firstValue = firstChoices.Count > 0 ? firstChoices[0].Key : "";
+    secondValue = secondChoices.Count > 0 ? secondChoices[0].Key : "";
+  }
+  action AddStep() {
+    if (stepAction == "") { problem = "Choose what it does."; return; }
+    List<ActionValue> values = [];
+    if (stepParams.Count > 0) { values.Add(new ActionValue { Parameter = stepParams[0].Name, Value = firstValue }); }
+    if (stepParams.Count > 1) { values.Add(new ActionValue { Parameter = stepParams[1].Name, Value = secondValue }); }
+    var next = steps.ToList();
+    next.Add(new AutomationStepSpec { Action = stepAction, Values = values });
+    steps = next;
+    addingStep = false;
+    Reword();
+  }
+  action DropStep(int i) { var next = steps.ToList(); next.RemoveAt(i); steps = next; Reword(); }
+
+  action Save() {
+    problem = "";
+    try {
+      SaveRule(new RuleDraft { Id = editingId, Subject = key, Name = name, Layer = teamRule ? AutomationLayer.Team : AutomationLayer.Personal, When = when == "@hourly" ? "" : when,
+                               Hourly = when == "@hourly", Off = off, Replaces = replaces, Tests = tests, Steps = steps });
+      notice = "“" + name.Trim() + "” saved.";
+      editing = false;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Remove() {
+    problem = "";
+    try {
+      RemoveRule(editingId!.Value);
+      notice = replaces != "" ? "Restored the app's rule." : "“" + name.Trim() + "” removed.";
+      editing = false;
+      Load();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Copy(RuleLine line, AutomationLayer to) {
+    notice = ""; problem = "";
+    try {
+      CopyRule(key, line.Default, to);
+      notice = to == AutomationLayer.Team ? "Copied for the team — change it here; the app's rule waits until you restore it."
+                                          : "Copied for you — it replaces the app's rule on yours.";
+      Load();
+    } catch (Exception ex) { notice = ex.Message; }
+  }
+  action Restore(RuleLine line) {
+    try { RemoveRule(line.Row!.Value); notice = "Restored the app's rule."; Load(); }
+    catch (Exception ex) { notice = ex.Message; }
+  }
+  action Switch(RuleLine line) {
+    try { SwitchRule(line.Row!.Value, line.Off); Load(); } catch (Exception ex) { notice = ex.Message; }
+  }
+  action Lock(RuleLine line) {
+    try { LockRule(key, line.Default, !line.Locked); notice = line.Locked ? "Unlocked." : "Locked — nobody's copy replaces it."; Load(); }
+    catch (Exception ex) { notice = ex.Message; }
+  }
+  action Move(RuleLine line, int by) {
+    try { MoveRule(line.Row!.Value, by); Load(); } catch (Exception ex) { notice = ex.Message; }
+  }
+
+  string ConditionLabel(string k) {
+    var c = conditions.FirstOrDefault(x => x.Key == k);
+    return c == null ? k : c!.Label;
+  }
+  List<ConditionOp> OpsOf(string k) {
+    var c = conditions.FirstOrDefault(x => x.Key == k);
+    return c == null ? [] : c!.Ops;
+  }
+  List<ActionChoice> ConditionChoicesOf(string k) {
+    var c = conditions.FirstOrDefault(x => x.Key == k);
+    return c == null ? [] : c!.Choices;
+  }
+  ConditionKind KindOf(string k) {
+    var c = conditions.FirstOrDefault(x => x.Key == k);
+    return c == null ? ConditionKind.Text : c!.Kind;
+  }
+  string ActionLabel(string n) {
+    var a = actions.FirstOrDefault(x => x.Name == n);
+    return a == null ? n : a!.Label;
+  }
+  string ChoiceWords(List<ActionChoice> from, string k) {
+    var c = from.FirstOrDefault(x => x.Key == k);
+    return c == null ? k : c!.Label;
+  }
+  string TriggerLabel(string k) {
+    if (k == "@hourly") { return "Every hour, while it holds"; }
+    var c = triggers.FirstOrDefault(x => x.Key == k);
+    return c == null ? k : c!.Label;
+  }
+
+  render {
+    SettingsPage("Automations", description: $"Rules that do the routine work on each {noun} when something happens — run in order, each run written on the {noun}. The app's own rules keep its updates; copy one to change it for the team, or for yours.") {
+      if (notice != "") { Alert(notice); }
+      SettingsSection("Rules, in the order they run") {
+        Stack(gap: 0, role: UiRole.List, label: "Rules") {
+          if (lines.Count == 0) {
+            EmptyState("No rules yet", body: $"Add one for the work that always follows the same event — tag it, set it, tell somebody.");
+          }
+          foreach (var line in lines) { RuleRow(line, manager, () => Open(line), () => Copy(line, AutomationLayer.Team),
+                                                 () => Copy(line, AutomationLayer.Personal), () => Restore(line),
+                                                 () => Switch(line), () => Lock(line), () => Move(line, -1), () => Move(line, 1)); }
+        }
+        Row(gap: 2) { Button("Add a rule", onPress: New, tone: Tone.Primary, size: Size.Sm); }
+      }
+      SettingsSection("What ran lately", description: $"Every run is also on its {noun}'s own history.") {
+        if (fires.Count == 0) {
+          EmptyState("Nothing has run yet", body: $"When a rule runs on a {noun}, it is listed here — what it did, or why it stopped.");
+        }
+        Stack(gap: 0, role: UiRole.List, label: "What ran lately") {
+          foreach (var f in fires) {
+            Stack(gap: 1, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: f.Said) {
+              Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+                if (f.Link != "") { Link(href: f.Link) { Text(f.Title != "" ? f.Title : "Open", fontWeight: FontWeight.Medium); } }
+                Badge(f.Outcome.Label, tone: f.Outcome == FireOutcome.Done ? Tone.Success : f.Outcome == FireOutcome.Refused ? Tone.Danger : Tone.Warning);
+                Spacer();
+                Text($"{f.At:d MMM HH:mm}", fontSize: FontSize.Caption, color: Colors.TextMuted, whiteSpace: WhiteSpace.Nowrap);
+              }
+              Text(f.Said, fontSize: FontSize.Label, color: Colors.TextSecondary);
+            }
+          }
+        }
+      }
+    }
+    if (editing) {
+      Dialog(editingId == null && replaces == "" ? "New rule" : name, onDismiss: Close,
+             subtitle: replaces != "" ? "A copy of one of the app's rules — it replaces the app's while it exists. Remove it to restore the app's." : "") {
+        Field("Name", value: name, placeholder: "Urgent words raise the priority");
+        Dropdown("When", value: when, options: whenKeys.ToArray()) { k => Text(TriggerLabel(k)); }
+        Stack(gap: 1, label: "Only if") {
+          FieldLabel("Only if — all of these hold");
+          if (tests.Count == 0) { Text($"Always — on every {noun} it happens to.", fontSize: FontSize.Caption, color: Colors.TextMuted); }
+          foreach (var i in Enumerable.Range(0, testWords.Count)) {
+            Row(gap: 2, align: Align.Center, label: testWords[i]) {
+              Icon(Icons.Filter, size: 12, color: Colors.Primary);
+              Text(testWords[i], fontSize: FontSize.Label, grow: 1);
+              IconButton("Remove " + testWords[i], () => DropTest(i), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.Close, size: 10); }
+            }
+          }
+          if (addingTest) {
+            Card {
+              Dropdown("Asks", value: testKey, options: conditions.Select(c => c.Key).ToArray(), placeholder: "Choose…") { k => Text(ConditionLabel(k)); }
+              if (testKey != "") {
+                Dropdown("Compared", value: testOp, options: OpsOf(testKey).ToArray());
+                if (KindOf(testKey) == ConditionKind.Choice) {
+                  Dropdown("Value", value: testValue, options: ConditionChoicesOf(testKey).Select(c => c.Key).ToArray(), placeholder: "Choose…") { k => Text(ChoiceWords(ConditionChoicesOf(testKey), k)); }
+                } else if (KindOf(testKey) == ConditionKind.Flag) {
+                  Dropdown("Value", value: testValue, options: ["true", "false"]) { k => Text(k == "true" ? "Yes" : "No"); }
+                } else {
+                  Field(KindOf(testKey) == ConditionKind.Hours ? "Hours" : "Value", value: testValue,
+                        placeholder: KindOf(testKey) == ConditionKind.Hours ? "24" : "");
+                }
+              }
+              Row(gap: 2) {
+                Button("Add the condition", onPress: AddTest, tone: Tone.Primary, size: Size.Sm);
+                Button("Cancel", onPress: StartTest, tone: Tone.Ghost, size: Size.Sm);
+              }
+            }
+          } else {
+            Row { Button("Add a condition", onPress: StartTest, tone: Tone.Ghost, size: Size.Sm); }
+          }
+        }
+        Stack(gap: 1, label: "Then") {
+          FieldLabel("Then — in order");
+          if (steps.Count == 0) { Text("Nothing yet — add what it does.", fontSize: FontSize.Caption, color: Colors.TextMuted); }
+          foreach (var i in Enumerable.Range(0, stepWords.Count)) {
+            Row(gap: 2, align: Align.Center, label: stepWords[i]) {
+              Icon(Icons.Bolt, size: 12, color: Colors.Primary);
+              Text(stepWords[i], fontSize: FontSize.Label, grow: 1);
+              IconButton("Remove " + stepWords[i], () => DropStep(i), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.Close, size: 10); }
+            }
+          }
+          if (addingStep) {
+            Card {
+              Dropdown("Does", value: stepAction, options: actions.Select(a => a.Name).ToArray(), placeholder: "Choose…") { k => Text(ActionLabel(k)); }
+              Row(gap: 2) { Button("Choose", onPress: PickAction, tone: Tone.Ghost, size: Size.Sm); }
+              if (stepParams.Count > 0) { ParamInput(stepParams[0], firstChoices, firstValue); }
+              if (stepParams.Count > 1) { ParamInput(stepParams[1], secondChoices, secondValue); }
+              Row(gap: 2) {
+                Button("Add the step", onPress: AddStep, tone: Tone.Primary, size: Size.Sm);
+                Button("Cancel", onPress: StartStep, tone: Tone.Ghost, size: Size.Sm);
+              }
+            }
+          } else {
+            Row { Button("Add a step", onPress: StartStep, tone: Tone.Ghost, size: Size.Sm); }
+          }
+        }
+        Switch("Off — keep it, but do not run it", value: off);
+        if (manager && editingId == null && replaces == "") {
+          Checkbox("The whole team's — it runs on every " + noun, value: teamRule);
+        }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.Between) {
+          if (editingId != null) { Button(replaces != "" ? "Restore the app's rule" : "Remove the rule", onPress: Remove, tone: Tone.Danger); } else { Spacer(); }
+          Row(gap: 2) {
+            Button("Cancel", onPress: Close, tone: Tone.Ghost);
+            Button("Save", onPress: Save, tone: Tone.Primary);
+          }
+        }
+      }
+    }
+  }
+}
+
+/// One rule in the list: its sentence, its notes, and what the reader may do with it.
+component RuleRow(RuleLine line, bool manager, Action onOpen, Action onCopyForTeam, Action onCopyForMe, Action onRestore,
+                  Action onSwitch, Action onLock, Action onUp, Action onDown) {
+  render {
+    // A copy sits under the rule it replaces, indented, with an accent edge; a rule that does not run here is dimmed.
+    Row(gap: 3, align: Align.Start, py: 3, pl: line.IsCopy ? 4 : 0, ml: line.IsCopy ? 6 : 0,
+        borderBW: 1, borderLW: line.IsCopy ? 2 : 0, border: Colors.Border,
+        role: UiRole.ListItem, label: line.Name + " — " + line.Whose.ToLower(),
+        opacity: line.Off || line.Replaced ? 0.6 : 1) {
+      if (line.Layer == null) { Icon(Icons.Bolt, size: 14, color: Colors.TextMuted); } else { Icon(Icons.Bolt, size: 14, color: Colors.Primary); }
+      Stack(gap: 1, grow: 1, minW: "0") {
+        Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+          Text(line.Name, fontWeight: FontWeight.Medium);
+          Badge(line.Whose, tone: line.Layer == null ? Tone.Default : line.Layer == AutomationLayer.Team ? Tone.Primary : Tone.Success);
+          if (line.Locked) { Badge("Locked", tone: Tone.Warning); }
+          if (line.Off) { Badge("Off", tone: Tone.Default); }
+        }
+        Row(gap: 2, align: Align.Start) {
+          Text("When", fontSize: FontSize.Caption, color: Colors.TextMuted, minW: "36px");
+          Text(line.If != "" ? $"{line.When}, if {line.If}" : line.When, fontSize: FontSize.Caption, color: Colors.TextSecondary, minW: "0");
+        }
+        Row(gap: 2, align: Align.Start) {
+          Text("Then", fontSize: FontSize.Caption, color: Colors.TextMuted, minW: "36px");
+          Text(line.Then, fontSize: FontSize.Caption, color: Colors.TextSecondary, minW: "0");
+        }
+        foreach (var n in line.Notes) { Text(n, fontSize: FontSize.Caption, color: Colors.TextMuted); }
+        Row(gap: 1, align: Align.Center, wrap: Wrapping.Wrap, mt: 1) {
+          if (line.MayEdit) {
+            Button("Edit", onPress: onOpen, tone: Tone.Ghost, size: Size.Sm);
+            Button(line.Off ? "Switch on" : "Switch off", onPress: onSwitch, tone: Tone.Ghost, size: Size.Sm);
+          }
+          if (line.MayRestore) { Button("Restore", onPress: onRestore, tone: Tone.Ghost, size: Size.Sm); }
+          if (line.MayCopyForTeam) { Button("Copy for the team", onPress: onCopyForTeam, tone: Tone.Ghost, size: Size.Sm); }
+          if (line.MayCopyForMe) { Button("Copy for mine", onPress: onCopyForMe, tone: Tone.Ghost, size: Size.Sm); }
+          if (line.MayLock) { Button(line.Locked ? "Unlock" : "Lock", onPress: onLock, tone: Tone.Ghost, size: Size.Sm); }
+          if (line.MayMove) {
+            Button("Move up", onPress: onUp, tone: Tone.Ghost, size: Size.Sm);
+            Button("Move down", onPress: onDown, tone: Tone.Ghost, size: Size.Sm);
+          }
+        }
+      }
+    }
+  }
+}
+
+/// One parameter of a step being added — a choice from what it offers, words, a number, yes or no.
+component ParamInput(ActionParameter p, List<ActionChoice> choices, Binding<string> value) {
+  string Words(string k) {
+    var c = choices.FirstOrDefault(x => x.Key == k);
+    return c == null ? k : c!.Label;
+  }
+  render {
+    if (choices.Count > 0) {
+      Dropdown(p.Label, value: value, options: choices.Select(c => c.Key).ToArray()) { k => Text(Words(k)); }
+    } else if (p.Kind == ActionParameterKind.YesNo) {
+      Dropdown(p.Label, value: value, options: ["true", "false"]) { k => Text(k == "true" ? "Yes" : "No"); }
+    } else {
+      Field(p.Label, value: value);
+    }
+  }
+}
+
+/// The choices one parameter offers the reader — an enum's members, or what its `[Choices]` function answers for them.
+public List<ActionChoice> ChoicesOf(string action, ActionParameter p) {
+  return p.ChoicesFromData ? Actions.Choices(action, p.Name) : p.Choices;
+}
+
+/// A condition being written, as the editor says it.
+public string TestLine(string subjectKey, AutomationTestSpec t) { return TestWords(SubjectFor(subjectKey), t); }
+
+/// A step being written, as the editor says it.
+public string StepLine(AutomationStepSpec s) {
+  var info = Actions.Find(s.Action);
+  return info == null ? s.Action : StepWords(info!, s.Values);
+}

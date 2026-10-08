@@ -1,0 +1,356 @@
+namespace Osysharp.Automations;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+// RUNNING — every event the app raises about a record is heard here, after the commit that raised it, and the rules about
+// that record that run on it run; the hourly clock runs the hourly rules. Each rule that runs leaves a FIRE: what it was,
+// what each step did or why it stopped, and who it ran as — and raises `AutomationRan`, so the record's history (a
+// timeline, the app's own) says so.
+//
+// ⚑ AFTER THE COMMIT, NEVER BEFORE. An event is heard once the work that raised it is committed, so a rule never acts on
+//   something that was rolled back, and reads the record as it now stands.
+//
+// ⚑ AN EVENT NO RULE IS ON COSTS NOTHING. `RunRules` says which events it cares about (`[Interest(nameof(RuleTriggers))]`)
+//   — the ones some rule that is on runs on — and the platform keeps that answer until a rule is saved, so an event no
+//   rule is on is never written, delivered or read for. The rules of the events one commit raised are read ONCE between
+//   them (`SavedRulesOf`, `[OncePerDelivery]`).
+//
+// ⚑ LOOP PROTECTION, BY CASCADE. A step runs as an action, and what it raises is in the same cascade as the event the
+//   rule ran on (the platform carries it): a rule runs once in a cascade, and is stopped (said once) when what it, or a
+//   rule it set off, did would run it again; a chain deeper than `MaxChain` is stopped too. Both are written as a fire,
+//   so a loop shows on the record. A rule set off by its OWN step alone (it tagged the record, and tagging is a change)
+//   is not a loop anybody needs to read about: it is passed over without a word. SECURITY-INVARIANT(an-automation-never-loops),
+//   guarded by tests/running.test.osy `two_rules_that_undo_each_other_each_run_once_and_the_loop_is_on_the_record`.
+
+/// How a rule's run ended. ⚠ Appended, never inserted.
+public enum FireOutcome {
+  /// Every step was done.
+  [Label("Done")] Done,
+  /// A step was refused — by the action, or by the rules of the person it ran as; the steps after it did not run.
+  [Label("Refused")] Refused,
+  /// It did not run: it would have run again in a chain it had started, or the chain was too long.
+  [Label("Stopped")] Stopped,
+}
+
+/// One run of one rule on one record — the history.
+public entity AutomationFire {
+  /// The record type its rules are about, by full name.
+  [Required, MaxLength(200)] string Subject;
+  /// The record it ran on. A fire goes with its record.
+  [Required, OnDelete(Remove)] Entity Record;
+  /// "default:<key>" or "rule:<id>".
+  [Required, MaxLength(100)] string RuleKey;
+  /// The cascade it ran in — its event's root — so a rule runs once in one.
+  [MaxLength(64)] string Root = "";
+  /// Its name when it ran.
+  [MaxLength(120)] string RuleName = "";
+  /// Whose rule — none for the app's own.
+  AutomationLayer? Layer;
+  /// The app's rule it was, or replaced.
+  [MaxLength(80)] string Default = "";
+  /// The event it ran on, by class — "" for the hourly clock.
+  [MaxLength(200)] string Trigger = "";
+  DateTime At;
+  /// An hourly rule: when the clock it read started — it runs once for each.
+  DateTime? Since;
+  FireOutcome Outcome;
+  /// What each step was, and what it said — `[["Set priority: Urgent","Priority set to Urgent."], …]`.
+  [MaxLength(4000)] string Steps = "";
+  /// Why it stopped, or the step that was refused and why.
+  [MaxLength(1000)] string Problem = "";
+  /// Who it ran as — a person's name, or "the app".
+  [MaxLength(200)] string RanAs = "";
+  security {
+    allow read when RunsAutomations;
+    deny create;
+    deny update;
+    deny delete;
+  }
+}
+
+/// A rule ran on a record, or was stopped — what the record's history says: "Rule “Refunds go high” (as Ada Lindgren):
+/// Set priority: High." Raised for every fire, so a timeline (`Osysharp.Activity`) or the app's own history hears it.
+[Event("An automation ran")]
+public sealed class AutomationRan {
+  public Entity Record;
+  public AutomationFire Fire;
+  public override string Sentence() { return FireSentence(Fire); }
+}
+
+/// Every event about a record runs the rules about that record that are on it — after the commit that raised it, as the
+/// app. It hears only the events some rule is on (`RuleTriggers`).
+[On]
+[Interest(nameof(RuleTriggers))]
+internal void RunRules(Event e) {
+  var record = Events.About(e);
+  if (record == null) { return; }
+  var trigger = Events.Type(e);
+  if (trigger == typeof(AutomationRan).FullName) { return; }
+  var subject = SubjectOf(Records.Type(record!));
+  var key = subject.Record;
+  var holder = subject.HolderOf(record!);
+  Guid? who = null;
+  if (holder != null) { who = holder!.Id; }
+  var saved = SavedRulesOf(key, who);
+  if (!subject.Defaults().Any(d => !d.Hourly && !d.Off && d.When == trigger)
+      && !saved.Team.Any(r => r.When == trigger) && !saved.Mine.Any(r => r.When == trigger)) { return; }
+  var setup = App.Setting<AutomationsSetup>();
+  // The CASCADE it belongs to — the event nothing automatic caused, at its top — and how deep in it this one is. When a
+  // rule's own step raised it, that rule.
+  var delivery = Events.Delivery();
+  var root = delivery == null ? Guid.NewGuid().ToString() : delivery!.Root.ToString();
+  var depth = delivery == null ? 0 : delivery!.Depth;
+  var by = "";
+  if (delivery != null && delivery!.Cause != "") {
+    var causeId = Guid.Parse(delivery!.Cause);
+    var caused = AutomationFire.FirstOrDefault(f => f.Id == causeId);
+    if (caused != null) { by = caused!.RuleKey; }
+  }
+  var rules = RulesFrom(subject, saved).Where(r => !r.Hourly && !r.Off && r.When == trigger).ToList();
+  // What a rule may ask, once for every rule — the record's fields cost no statement; a computed condition may.
+  var conditions = rules.Any(r => r.Tests.Count > 0) ? ConditionsOf(subject) : new List<AutomationCondition>();
+  var now = DateTime.UtcNow;
+  foreach (var rule in rules) {
+    if (!HoldsAt(conditions, rule.Tests, record!, now)) { continue; }
+    var ruleKey = rule.Key;
+    // A rule runs once in a cascade: on what it, or a rule it set off, did, it is stopped — said once, not every turn.
+    if (AutomationFire.Any(f => f.Root == root && f.RuleKey == ruleKey && f.Outcome != FireOutcome.Stopped)) {
+      if (by != ruleKey && !AutomationFire.Any(f => f.Root == root && f.RuleKey == ruleKey && f.Outcome == FireOutcome.Stopped)) {
+        Stop(subject, rule, record!, trigger, root, null, "It already ran on this — it would have run again on what it, or a rule it set off, had just done.");
+      }
+      continue;
+    }
+    if (depth >= setup.MaxChain) {
+      Stop(subject, rule, record!, trigger, root, null, $"{depth} automations ran in a row on this {NounOf(key)} — the chain was stopped here.");
+      continue;
+    }
+    RunRule(subject, rule, record!, trigger, root, null);
+  }
+}
+
+/// The events some rule that is on runs on — the app's own and every saved one, the team's and each person's — by type:
+/// what `RunRules` hears. Kept by the platform until a rule is saved, so it is read once, not per event.
+List<string> RuleTriggers() {
+  List<string> types = [];
+  foreach (var subject in App.Setting<AutomationsSetup>().Subjects) {
+    foreach (var d in subject.Defaults()) {
+      if (!d.Off && !d.Hourly && !types.Contains(d.When)) { types.Add(d.When); }
+    }
+  }
+  foreach (var when in AutomationRule.Where(r => !r.Hourly && !r.Off).Select(r => r.When).ToList()) {
+    if (!types.Contains(when)) { types.Add(when); }
+  }
+  return types;
+}
+
+/// Whether every condition holds on `record`. A condition the subject no longer offers does not hold.
+public bool Holds(AutomationSubjectBase subject, List<AutomationTestSpec> tests, Entity record) {
+  return tests.Count == 0 || HoldsAt(ConditionsOf(subject), tests, record, DateTime.UtcNow);
+}
+
+/// Whether every condition holds on `record` at `now`, against the conditions in hand.
+bool HoldsAt(List<AutomationCondition> conditions, List<AutomationTestSpec> tests, Entity record, DateTime now) {
+  foreach (var t in tests) {
+    var c = conditions.FirstOrDefault(x => x.Key == t.Condition);
+    if (c == null || !HoldsOne(c!, t, record, now)) { return false; }
+  }
+  return true;
+}
+
+bool HoldsOne(AutomationCondition c, AutomationTestSpec t, Entity record, DateTime now) {
+  if (c.Kind == ConditionKind.Hours) {
+    var since = c.Since(record);
+    if (since == null) { return false; }
+    var hours = (now - since.Value).TotalHours;
+    var want = Convert.ToDecimal(t.Value);
+    if (t.Op == ConditionOp.AtLeast) { return (decimal)hours >= want; }
+    if (t.Op == ConditionOp.AtMost) { return (decimal)hours <= want; }
+    return Math.Floor((decimal)hours) == want;
+  }
+  if (c.Kind == ConditionKind.Flag) {
+    var want = t.Value == "true";
+    return t.Op == ConditionOp.IsNot ? c.Is(record) != want : c.Is(record) == want;
+  }
+  var value = c.Value(record);
+  if (c.Kind == ConditionKind.Number) {
+    if (value.Trim() == "") { return false; }
+    var have = Convert.ToDecimal(value);
+    var want = Convert.ToDecimal(t.Value);
+    if (t.Op == ConditionOp.AtLeast) { return have >= want; }
+    if (t.Op == ConditionOp.AtMost) { return have <= want; }
+    return have == want;
+  }
+  if (c.Kind == ConditionKind.Text) {
+    var have = value.ToLower();
+    var want = t.Value.ToLower();
+    if (t.Op == ConditionOp.Contains) { return have.Contains(want); }
+    if (t.Op == ConditionOp.DoesNotContain) { return !have.Contains(want); }
+    if (t.Op == ConditionOp.IsNot) { return have != want; }
+    return have == want;
+  }
+  return t.Op == ConditionOp.IsNot ? value != t.Value : value == t.Value;
+}
+
+/// Run `rule` on `record`: its steps in order, each as whoever the rule runs as, with this fire as their cause; the first
+/// refused stops the rest. Recorded, and `AutomationRan` raised.
+///
+/// ⚠ A step is an action, and an action runs on its own unit of work and commits — the work of the event's other
+///   handlers so far commits with it, because the action must read it.
+void RunRule(AutomationSubjectBase subject, RuleToRun rule, Entity record, string trigger, string root, DateTime? since) {
+  var fire = NewFire(subject, rule, record, trigger, root, since);
+  var cause = fire.Id.ToString();
+  List<List<string>> done = [];
+  foreach (var step in rule.Steps) {
+    var action = Actions.Find(step.Action);
+    if (action == null) {
+      fire.Outcome = FireOutcome.Refused;
+      fire.Problem = $"“{WordsOf(step, null)}” cannot run — the app no longer offers it.";
+      break;
+    }
+    var subjectParam = action!.Parameters.FirstOrDefault(p => p.Subject);
+    List<ActionValue> here = [];
+    if (subjectParam != null) { here.Add(new ActionValue { Parameter = subjectParam!.Name, Value = record.Id.ToString() }); }
+    ActionResult result;
+    if (rule.Row == null) {
+      // The app's own rule — the app's authority, as its own code.
+      List<ActionValue> all = step.Values.ToList();
+      foreach (var v in here) { all.Add(v); }
+      result = Actions.Run(step.Action, all, cause: cause);
+    } else {
+      // A person's rule, or the team's — as whoever saved it, under their own rules.
+      result = Actions.RunConsented(step.Consent, here, cause: cause);
+    }
+    fire.RanAs = result.RanAs;
+    if (result.Outcome != ActionOutcome.Done) {
+      fire.Outcome = FireOutcome.Refused;
+      fire.Problem = $"“{WordsOf(step, action)}” was not done: {result.Problem}";
+      break;
+    }
+    done.Add([WordsOf(step, action), result.Said]);
+  }
+  fire.Steps = JsonSerializer.Serialize(done);
+  Raise(new AutomationRan { Record = record, Fire = fire });
+}
+
+/// A fire written as the kit's — Done until a step says otherwise.
+AutomationFire NewFire(AutomationSubjectBase subject, RuleToRun rule, Entity record, string trigger, string root, DateTime? since) {
+  return new AutomationFire {
+    Subject = subject.Record, Record = record, RuleKey = rule.Key, RuleName = rule.Name, Layer = rule.Layer,
+    Default = rule.Default, Trigger = trigger, At = DateTime.UtcNow, Since = since, Root = root,
+    Outcome = FireOutcome.Done, RanAs = rule.Row == null ? "the app" : "",
+  };
+}
+
+/// A rule that did not run — recorded, and `AutomationRan` raised, so a loop shows on the record.
+void Stop(AutomationSubjectBase subject, RuleToRun rule, Entity record, string trigger, string root, DateTime? since, string why) {
+  var fire = NewFire(subject, rule, record, trigger, root, since);
+  fire.Outcome = FireOutcome.Stopped;
+  fire.Problem = why;
+  fire.Steps = "[]";
+  Raise(new AutomationRan { Record = record, Fire = fire });
+}
+
+// ── the hourly clock ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Whether the clock runs. ⚠ Appended, never inserted.
+public enum AutomationWatchState {
+  [Label("Checking hourly")] Watching,
+  [Label("Stopped")] Stopped,
+}
+
+/// The one row the hourly clock runs on — made when the app loads with an hourly rule of its own (`StartTheHourlyClock`),
+/// or when the first rule is saved.
+public entity AutomationWatch {
+  AutomationWatchState State;
+  security {
+    allow read, create when RunsAutomations;
+    deny update;
+    deny delete;
+  }
+}
+
+/// The hourly clock starts when the app loads, if one of the app's own rules is hourly — once, whatever the number of
+/// nodes or loads: a start hook runs on every one of them, so it looks before it makes the row. (A team's or a person's
+/// hourly rule starts it when it is saved — `SaveRule`.) So no delivery asks whether the clock is running.
+[OnStart]
+internal void StartTheHourlyClock() {
+  var hourly = App.Setting<AutomationsSetup>().Subjects.Any(s => s.Defaults().Any(d => d.Hourly && !d.Off));
+  if (hourly && !AutomationWatch.Any()) { new AutomationWatch(); }
+}
+
+/// Every hour: each hourly rule, on each record its subject is watching, once for each time its clock started.
+public workflow AutomationClock {
+  Tracks    = AutomationWatch.State;
+  Autostart = true;
+  Initial   = Watching;
+
+  event Stop();
+
+  state Watching {
+    subscribe Stop() as Stopping {
+      Finished {
+        Within = TimeSpan.FromDays(36500);
+        Remind Tick(After = TimeSpan.FromHours(1), ThenEvery = TimeSpan.FromHours(1)) { SweepAutomations(DurableClock.UtcNow); }
+        Unfinished { }
+      }
+    }
+    on Stopping() { goto Stopped; }
+  }
+  terminal cancel Stopped { }
+}
+
+/// One tick of the clock at `now`: every hourly rule on every watched record — run once for each start of the clock it
+/// reads (its first condition on hours: "in its status since"), so a record that waits on runs it again only when it
+/// starts waiting again. Then fires older than `KeepFires` are deleted. Answers how many rules ran.
+public int SweepAutomations(DateTime now) {
+  var setup = App.Setting<AutomationsSetup>();
+  var ran = 0;
+  foreach (var subject in setup.Subjects) {
+    var conditions = ConditionsOf(subject);
+    foreach (var record in subject.Watching()) {
+      foreach (var rule in RulesFor(subject, record).Where(r => r.Hourly && !r.Off)) {
+        var clock = rule.Tests.Select(t => conditions.FirstOrDefault(c => c.Key == t.Condition))
+          .FirstOrDefault(c => c != null && c.Kind == ConditionKind.Hours);
+        var since = clock == null ? null : clock!.Since(record);
+        if (since == null) { continue; }
+        if (!HoldsAt(conditions, rule.Tests, record, now)) { continue; }
+        var key = rule.Key;
+        var at = since.Value;
+        if (AutomationFire.Any(f => f.RuleKey == key && f.Record == record && f.Since == at)) { continue; }
+        RunRule(subject, rule, record, "", "", since);
+        ran = ran + 1;
+      }
+    }
+  }
+  var cutoff = now - setup.KeepFires;
+  foreach (var f in AutomationFire.Where(x => x.At < cutoff).Take(500).ToList()) { f.Delete(); }
+  return ran;
+}
+
+// ── what a fire says ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// What a fire says, in the reader's words — for a record's history and the rules page: "Rule “Weekend rush” ran: Set
+/// rush: Today.", "Rule “Tell the lead” was refused — “Tell the lead” was not done: …", "Rule “X” was stopped: …".
+public string FireSentence(AutomationFire fire) {
+  // The app's own rule is named as the app names it NOW, in the reader's words; a person's rule as it was saved.
+  var ruleName = fire.RuleName;
+  if (fire.Layer == null && fire.Default != "") {
+    var subject = SubjectOf(fire.Subject);
+    var key = fire.Default;
+    var d = subject.Defaults().FirstOrDefault(x => x.Key == key);
+    if (d != null) { ruleName = d!.Name; }
+  }
+  var name = fire.Layer == null ? $"The app's rule “{ruleName}”" : $"Rule “{ruleName}”";
+  if (fire.Outcome == FireOutcome.Stopped) { return $"{name} was stopped: {fire.Problem}"; }
+  List<string> did = [];
+  foreach (var pair in JsonSerializer.Deserialize<List<List<string>>>(fire.Steps == "" ? "[]" : fire.Steps)) {
+    if (pair.Count > 0) { did.Add(pair[0]); }
+  }
+  var who = fire.RanAs == "" || fire.Layer == null ? "" : $" (as {fire.RanAs})";
+  if (fire.Outcome == FireOutcome.Refused) {
+    return did.Count == 0 ? $"{name}{who} did nothing: {fire.Problem}"
+                          : $"{name}{who} did {string.Join(" · ", did)} — then {fire.Problem}";
+  }
+  return $"{name}{who}: {string.Join(" · ", did)}.";
+}

@@ -1,0 +1,353 @@
+namespace Osysharp.Automations;
+
+using Osysharp.Identity;
+
+// KEEPING THE RULES — what the rules page shows and every change it makes. Each runs on the server, as the person on the
+// page: what they may read and change is the rules' own security, never this file's.
+
+/// One rule as the list shows it.
+public class RuleLine {
+  /// "default:<key>" or "rule:<id>".
+  public string Key = "";
+  public string Name = "";
+  /// Whose — the app's, the team's, yours.
+  public string Whose = "";
+  /// "When a job is placed", "Every hour".
+  public string When = "";
+  /// "Status is Waiting · Hours in its status is at least 24".
+  public string If = "";
+  /// "Set rush: Today · Tell the lead".
+  public string Then = "";
+  /// What is true of it now — "The team's copy replaces it", "Your copy replaces it on yours", "Locked", "Off",
+  /// "The app's rule has changed since this copy".
+  public List<string> Notes = [];
+  /// The app's rule it is, or replaces.
+  public string Default = "";
+  public Guid? Row;
+  public AutomationLayer? Layer;
+  public bool Off;
+  public bool Locked;
+  /// What the reader may do with it.
+  public bool MayEdit;
+  public bool MayCopyForTeam;
+  public bool MayCopyForMe;
+  public bool MayRestore;
+  public bool MayLock;
+  public bool MayMove;
+  /// A copy of one of the app's rules (shown under it), and an app's rule a copy replaces for the reader's team or theirs.
+  public bool IsCopy;
+  public bool Replaced;
+}
+
+/// A rule as the editor holds it.
+public class RuleDraft {
+  public Guid? Id;
+  public string Subject = "";
+  public string Name = "";
+  public AutomationLayer Layer = AutomationLayer.Team;
+  public string When = "";
+  public bool Hourly;
+  public bool Off;
+  /// The app's rule this copy replaces — "" for a rule of its own.
+  public string Replaces = "";
+  public List<AutomationTestSpec> Tests = [];
+  public List<AutomationStepSpec> Steps = [];
+}
+
+/// A condition as the editor offers it.
+public class ConditionInfo {
+  public string Key = "";
+  public string Label = "";
+  public ConditionKind Kind;
+  public List<ActionChoice> Choices = [];
+  public List<ConditionOp> Ops = [];
+}
+
+/// Whether the reader keeps the team's rules.
+public bool KeepsTeamRules() { return ManagesAutomations; }
+
+/// The rules of `subject`, as the reader sees them: the app's (or the copy that replaces each), the team's own, and the
+/// reader's own — each with what they may do with it.
+[SuppressWarning("cost-unbounded-read")]   // one subject's rules — the team's and the reader's own — and its locks
+public List<RuleLine> RuleLines(string subjectKey) {
+  var subject = SubjectFor(subjectKey);
+  var key = subject.Record;
+  // What a rule may ask, as the reader may read it — read once for every line.
+  var conditions = ConditionsOf(subject);
+  var me = Session.CurrentUser!;
+  var meId = me.Id;
+  var manager = ManagesAutomations;
+  var locks = AutomationLock.Where(l => l.Subject == key).Select(l => l.Default).ToList();
+  // With who each runs as, which every line says.
+  var team = AutomationRule.Where(r => r.Subject == key && r.Layer == AutomationLayer.Team).Include(r => r.Owner)
+    .OrderBy(r => r.Position).ToList();
+  var mine = AutomationRule.Where(r => r.Subject == key && r.Layer == AutomationLayer.Personal && r.Owner.Id == meId)
+    .Include(r => r.Owner).OrderBy(r => r.Position).ToList();
+  var parts = RulePartsOf(team, mine);
+  List<RuleLine> lines = [];
+  foreach (var d in subject.Defaults()) {
+    var locked = d.Locked || locks.Contains(d.Key);
+    var teamCopy = team.FirstOrDefault(r => r.Replaces == d.Key);
+    var myCopy = mine.FirstOrDefault(r => r.Replaces == d.Key);
+    var line = new RuleLine {
+      Key = "default:" + d.Key, Name = d.Name, Whose = "The app's", When = WhenWords(subject, d.When, d.Hourly),
+      If = string.Join(" " + Translate("and") + " ", d.If.Select(t => TestWordsIn(conditions, t))), Then = string.Join(" · ", StepWordsOf(d.Then)),
+      Default = d.Key, Off = d.Off, Locked = locked,
+      MayCopyForTeam = manager && !locked && teamCopy == null,
+      MayCopyForMe = !locked && myCopy == null,
+      MayLock = manager && !d.Locked,
+    };
+    if (d.Off) { line.Notes.Add("Off until the team switches it on"); }
+    if (locked) { line.Notes.Add(d.Locked ? "Locked by the app" : "Locked — nobody replaces it"); }
+    if (teamCopy != null) { line.Notes.Add(locked ? "The team's copy waits while it is locked" : "The team's copy replaces it"); line.Replaced = !locked; }
+    if (myCopy != null) { line.Notes.Add(locked ? "Your copy waits while it is locked" : "Your copy replaces it on yours"); line.Replaced = line.Replaced || !locked; }
+    lines.Add(line);
+    if (teamCopy != null) { lines.Add(RowLine(subject, conditions, teamCopy!, parts, manager, meId, d, locked)); }
+    if (myCopy != null) { lines.Add(RowLine(subject, conditions, myCopy!, parts, manager, meId, d, locked)); }
+  }
+  foreach (var r in team.Where(x => x.Replaces == "")) { lines.Add(RowLine(subject, conditions, r, parts, manager, meId, null, false)); }
+  foreach (var r in mine.Where(x => x.Replaces == "")) { lines.Add(RowLine(subject, conditions, r, parts, manager, meId, null, false)); }
+  return lines;
+}
+
+RuleLine RowLine(AutomationSubjectBase subject, List<AutomationCondition> conditions, AutomationRule r, RuleParts parts, bool manager, Guid meId,
+                 AutomationDefault? original, bool locked) {
+  var id = r.Id;
+  var tests = parts.Tests.Where(x => x.Rule.Id == id).ToList();
+  var steps = parts.Steps.Where(x => x.Rule.Id == id).ToList();
+  var mineToEdit = r.Layer == AutomationLayer.Personal ? r.Owner.Id == meId : manager;
+  var line = new RuleLine {
+    Key = "rule:" + id.ToString(), Name = r.Name,
+    Whose = r.Layer == AutomationLayer.Team ? "The team's" : "Yours",
+    When = WhenWords(subject, r.When, r.Hourly),
+    If = string.Join(" " + Translate("and") + " ", tests.Select(t => TestWordsIn(conditions, new AutomationTestSpec { Condition = t.Condition, Op = t.Op, Value = t.Value }))),
+    Then = string.Join(" · ", steps.Select(s => s.Label)),
+    Default = r.Replaces, Row = id, Layer = r.Layer, Off = r.Off, Locked = locked,
+    MayEdit = mineToEdit, MayRestore = mineToEdit && r.Replaces != "", MayMove = mineToEdit && r.Replaces == "",
+    IsCopy = r.Replaces != "",
+  };
+  if (r.Replaces != "") {
+    if (original != null && Fingerprint(original!) != r.CopiedFrom) { line.Notes.Add("The app's rule has changed since this copy"); }
+  }
+  if (r.Off) { line.Notes.Add("Off"); }
+  line.Notes.Add("Runs as " + (r.Owner.DisplayName != "" ? r.Owner.DisplayName : r.Owner.Email));
+  return line;
+}
+
+List<string> StepWordsOf(List<AutomationStepSpec> steps) {
+  List<string> words = [];
+  foreach (var s in steps) {
+    var info = Actions.Find(s.Action);
+    words.Add(info == null ? s.Action + " (no longer offered)" : StepWords(info!, s.Values));
+  }
+  return words;
+}
+
+/// What the editor offers for `subject`: its triggers…
+public List<ActionChoice> TriggerChoices(string subjectKey) {
+  var subject = SubjectFor(subjectKey);
+  return TriggersOf(subject).Select(e => new ActionChoice { Key = e.Type, Label = e.Label }).ToList();
+}
+
+/// …its conditions, with the operators each takes…
+public List<ConditionInfo> ConditionChoices(string subjectKey) {
+  List<ConditionInfo> all = [];
+  foreach (var c in ConditionsOf(SubjectFor(subjectKey))) {
+    all.Add(new ConditionInfo { Key = c.Key, Label = c.Label, Kind = c.Kind, Choices = c.Choices(), Ops = OpsFor(c.Kind) });
+  }
+  return all;
+}
+
+/// …and the actions a step may be — the app's `[Action]`s on its record, that it offers.
+public List<ActionInfo> StepChoices(string subjectKey) {
+  var subject = SubjectFor(subjectKey);
+  return Actions.Catalog().Where(a => a.Subject == subject.Record && subject.Offers(a)).ToList();
+}
+
+/// A rule as the editor holds it — a row, or one of the app's (to copy).
+[SuppressWarning("cost-unbounded-read")]   // one rule's conditions and steps
+public RuleDraft DraftOf(string subjectKey, string ruleKey) {
+  var subject = SubjectFor(subjectKey);
+  if (ruleKey.StartsWith("default:")) {
+    var dk = ruleKey.Substring(8);
+    var d = subject.Defaults().FirstOrDefault(x => x.Key == dk);
+    if (d == null) { throw new ValidationException("That rule is no longer one of the app's."); }
+    return new RuleDraft { Subject = subject.Record, Name = d!.Name, When = d.When, Hourly = d.Hourly, Off = d.Off,
+                           Replaces = d.Key, Tests = d.If, Steps = d.Then };
+  }
+  var id = Guid.Parse(ruleKey.Substring(5));
+  var r = AutomationRule.FirstOrDefault(x => x.Id == id);
+  if (r == null) { throw new ValidationException("That rule is gone — somebody removed it."); }
+  var draft = new RuleDraft { Id = id, Subject = r!.Subject, Name = r.Name, Layer = r.Layer, When = r.When,
+                              Hourly = r.Hourly, Off = r.Off, Replaces = r.Replaces };
+  foreach (var t in AutomationTest.Where(x => x.Rule.Id == id).OrderBy(x => x.Position).ToList()) {
+    draft.Tests.Add(new AutomationTestSpec { Condition = t.Condition, Op = t.Op, Value = t.Value });
+  }
+  foreach (var s in AutomationStep.Where(x => x.Rule.Id == id).OrderBy(x => x.Position).ToList()) {
+    draft.Steps.Add(new AutomationStepSpec { Action = s.Action, Values = ValuesOf(s.Values) });
+  }
+  return draft;
+}
+
+/// Save a rule — a new one when `d.Id` is none — as the reader: they are its owner, and each step carries their consent
+/// to run it as them. Refused, by sentence, when it could not run as written, when it would copy one of the app's rules
+/// that is locked, or when the reader may not keep a rule of that layer.
+[SuppressWarning("cost-unbounded-read")]   // one rule's conditions and steps, replaced
+public Guid SaveRule(RuleDraft d) {
+  var subject = SubjectFor(d.Subject);
+  var me = Session.CurrentUser!;
+  if (d.Name.Trim() == "") { throw new ValidationException("Name the rule — it is what the record's history says."); }
+  var problem = RuleProblem(subject, d.When, d.Hourly, d.Tests, d.Steps);
+  if (problem != "") { throw new ValidationException(problem); }
+  AutomationDefault? original = null;
+  if (d.Replaces != "") {
+    original = subject.Defaults().FirstOrDefault(x => x.Key == d.Replaces);
+    if (original == null) { throw new ValidationException("The app no longer has the rule this copies."); }
+    // SECURITY-INVARIANT(a-locked-rule-is-never-replaced): no copy of a locked rule is made, by anybody — and one made
+    // before it was locked waits (RulesFor). Guarded by tests/layers.test.osy `a_locked_rule_cannot_be_copied_and_its_copies_wait`.
+    if (IsLocked(subject, d.Replaces)) {
+      throw new ValidationException($"“{original!.Name}” is locked — it runs as the app wrote it, and nobody replaces it.");
+    }
+  }
+  var key = subject.Record;
+  AutomationRule r;
+  if (d.Id == null) {
+    if (d.Replaces != "") {
+      var replaces = d.Replaces;
+      var layer = d.Layer;
+      var meId = me.Id;
+      var already = layer == AutomationLayer.Team
+        ? AutomationRule.Any(x => x.Subject == key && x.Layer == AutomationLayer.Team && x.Replaces == replaces)
+        : AutomationRule.Any(x => x.Subject == key && x.Layer == AutomationLayer.Personal && x.Owner.Id == meId && x.Replaces == replaces);
+      if (already) { throw new ValidationException("There is already a copy of that rule here — change that one."); }
+    }
+    var last = AutomationRule.Where(x => x.Subject == key && x.Layer == d.Layer).OrderByDescending(x => x.Position).FirstOrDefault();
+    r = new AutomationRule { Subject = key, Name = d.Name.Trim(), Layer = d.Layer, Owner = me, Replaces = d.Replaces,
+                             Position = last == null ? 0 : last.Position + 1 };
+  } else {
+    var id = d.Id.Value;
+    var found = AutomationRule.FirstOrDefault(x => x.Id == id);
+    if (found == null) { throw new ValidationException("That rule is gone — somebody removed it."); }
+    r = found!;
+    foreach (var t in AutomationTest.Where(x => x.Rule.Id == id).ToList()) { t.Delete(); }
+    foreach (var s in AutomationStep.Where(x => x.Rule.Id == id).ToList()) { s.Delete(); }
+    // Whoever saves it now is who it runs as.
+    r.Owner = me;
+  }
+  r.Name = d.Name.Trim();
+  r.When = d.Hourly ? "" : d.When;
+  r.Hourly = d.Hourly;
+  r.Off = d.Off;
+  r.CopiedFrom = original == null ? "" : Fingerprint(original!);
+  r.ChangedAt = DateTime.UtcNow;
+  var position = 0;
+  var conditions = ConditionsOf(subject);
+  foreach (var t in d.Tests) {
+    new AutomationTest { Rule = r, Position = position, Condition = t.Condition, Op = t.Op, Value = t.Value,
+                         Label = TestWordsIn(conditions, t) };
+    position = position + 1;
+  }
+  position = 0;
+  foreach (var s in d.Steps) {
+    var info = Actions.Find(s.Action)!;
+    new AutomationStep { Rule = r, Position = position, Action = s.Action, Values = ValuesText(s.Values),
+                         Label = StepWords(info, s.Values), Consent = Actions.Consent(s.Action, s.Values) };
+    position = position + 1;
+  }
+  if (!AutomationWatch.Any()) { new AutomationWatch(); }
+  UnitOfWork.Commit();
+  return r.Id;
+}
+
+/// Duplicate one of the app's rules to change it — for the team, or for what the reader holds. The copy replaces it,
+/// and starts as an exact copy, saved as the reader.
+public Guid CopyRule(string subjectKey, string defaultKey, AutomationLayer layer) {
+  var draft = DraftOf(subjectKey, "default:" + defaultKey);
+  draft.Layer = layer;
+  draft.Name = draft.Name;
+  return SaveRule(draft);
+}
+
+/// Take a copy back — the app's rule runs again. Or remove a rule of the reader's own.
+[SuppressWarning("cost-unbounded-read")]   // one rule's conditions and steps, removed with it
+public void RemoveRule(Guid id) {
+  var r = AutomationRule.FirstOrDefault(x => x.Id == id);
+  if (r == null) { return; }
+  foreach (var t in AutomationTest.Where(x => x.Rule.Id == id).ToList()) { t.Delete(); }
+  foreach (var s in AutomationStep.Where(x => x.Rule.Id == id).ToList()) { s.Delete(); }
+  r!.Delete();
+  UnitOfWork.Commit();
+}
+
+/// Switch a rule (or a copy, which switches the app's rule off for whoever it replaces it for) on or off.
+public void SwitchRule(Guid id, bool on) {
+  var r = AutomationRule.Single(x => x.Id == id);
+  r.Off = !on;
+  r.Owner = Session.CurrentUser!;
+  r.ChangedAt = DateTime.UtcNow;
+  UnitOfWork.Commit();
+}
+
+/// Move a rule of the team's or the reader's own up (-1) or down (+1) among its layer's.
+[SuppressWarning("cost-unbounded-read")]   // one layer's own rules of one subject, to swap two
+public void MoveRule(Guid id, int by) {
+  var r = AutomationRule.Single(x => x.Id == id);
+  var key = r.Subject;
+  var layer = r.Layer;
+  var meId = Session.CurrentUser!.Id;
+  var row = layer == AutomationLayer.Team
+    ? AutomationRule.Where(x => x.Subject == key && x.Layer == layer && x.Replaces == "").OrderBy(x => x.Position).ToList()
+    : AutomationRule.Where(x => x.Subject == key && x.Layer == layer && x.Owner.Id == meId && x.Replaces == "").OrderBy(x => x.Position).ToList();
+  var i = row.FindIndex(x => x.Id == id);
+  var j = i + by;
+  if (i < 0 || j < 0 || j >= row.Count) { return; }
+  var other = row[j];
+  var p = r.Position;
+  r.Position = other.Position;
+  other.Position = p;
+  if (r.Position == other.Position) { r.Position = r.Position + by; }
+  UnitOfWork.Commit();
+}
+
+/// Lock one of the app's rules — nobody's copy replaces it while it is locked — or unlock it.
+public void LockRule(string subjectKey, string defaultKey, bool locked) {
+  var subject = SubjectFor(subjectKey);
+  var key = subject.Record;
+  if (!subject.Defaults().Any(d => d.Key == defaultKey)) { throw new ValidationException("That is not one of the app's rules."); }
+  var row = AutomationLock.FirstOrDefault(l => l.Subject == key && l.Default == defaultKey);
+  if (locked && row == null) { new AutomationLock { Subject = key, Default = defaultKey, By = Session.CurrentUser!, At = DateTime.UtcNow }; }
+  if (!locked && row != null) { row!.Delete(); }
+  UnitOfWork.Commit();
+}
+
+// ── the history ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// One fire, as the history shows it.
+public class FireLine {
+  public Guid Id;
+  public DateTime At;
+  public string Said = "";
+  public FireOutcome Outcome;
+  /// The record's own line, and where it opens.
+  public string Title = "";
+  public string Link = "";
+}
+
+/// What ran lately, newest first — on the record whose id is `record`, or on any the reader may read. A record is read
+/// through its fire AS THE READER: one they may not read reads as nothing, and nobody is shown what ran on it.
+public List<FireLine> RecentFires(string subjectKey, Guid? record = null, int take = 30) {
+  var subject = SubjectFor(subjectKey);
+  var key = subject.Record;
+  var fires = record == null
+    ? AutomationFire.Where(f => f.Subject == key).OrderByDescending(f => f.At).Take(take * 2).ToList()
+    : AutomationFire.Where(f => f.Subject == key && f.Record.Id == record.Value).OrderByDescending(f => f.At).Take(take).ToList();
+  List<FireLine> lines = [];
+  foreach (var f in fires) {
+    if (lines.Count >= take) { break; }
+    var on = f.Record;
+    if (on == null) { continue; }
+    lines.Add(new FireLine { Id = f.Id, At = f.At, Said = FireSentence(f), Outcome = f.Outcome,
+                             Title = Records.Title(on!), Link = Records.Link(on!) });
+  }
+  return lines;
+}

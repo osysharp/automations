@@ -1,0 +1,45 @@
+// Osysharp.Automations — rules that do the app's own work when something happens: "when a customer writes on a solved
+// ticket, set it Open and tell whoever holds it"; "when an order has waited 24 hours in Packing, raise it and tell the
+// lead". A rule is a TRIGGER, CONDITIONS and ACTIONS, run in order, each fire recorded.
+//
+// The kit never knows WHAT the rules are about — a ticket, an order, a job, a request — and the app does not tell it:
+//   · what HAPPENS to a record is its events (`[Event]` classes whose record it is) — the triggers;
+//   · what can be DONE to it is the app's functions marked `[Action]` with it as their subject — the steps;
+//   · what a rule may ASK of it is its own fields, as the rule's author may read them — the conditions.
+// So a record with events and actions has rules, and the app writes nothing more. It adds only what its model does not
+// say — the rules it ships with, a condition it computes, what the hourly clock looks at, whose a record is:
+//     app.Automations = new AutomationsSetup { Subjects = [new JobRules()] };
+//     public class JobRules : AutomationSubject<Job> {
+//       public override List<AutomationDefault> Defaults() { … When = On<JobPlaced>() … }
+//       public override List<Entity> Watching() { … }
+//     }
+//
+// ⚑ THREE LAYERS, AND A COPY IS HOW YOU CHANGE ONE. The app's rules come from its code and keep its updates. The team
+//   may DUPLICATE one to change it — the copy replaces it for everyone, and restoring the copy brings the app's back.
+//   A person may keep rules of their own, and copy one for what they hold, where the app says what "theirs" means. An
+//   app's rule can be LOCKED so nobody replaces it.
+//
+// ⚑ A RULE RUNS AS THE PERSON WHO SAVED IT, under their own rules — never as whoever caused the event, never widened.
+//   Saving a rule records that person's consent to each of its steps; a rule they could not have run by hand is
+//   refused when it fires, and says so on the record. The app's own rules run with the app's authority, as its own code
+//   does — so what the app keeps for a PERSON to do (a workflow event whose `[Authorize]` asks who raised it) its own
+//   rule cannot, and says so; a team copy does it as its saver. Nothing that is not marked `[Action]` can ever be a step.
+//
+// ⚑ LOOP-PROTECTED. A rule never runs twice in one chain of its own making, and a chain longer than `MaxChain`
+//   automations is stopped — both written on the record, so a loop is seen rather than suffered.
+//
+// ⚑ THE APP SAYS TWO THINGS:
+//     policy RunsAutomations => IsAgent;      // who sees the rules and keeps their own
+//     policy ManagesAutomations => IsAdmin;   // who keeps the team's, copies and locks the app's
+package Osysharp.Automations {
+  version     "0.6.0";
+  minPlatform "0.9.0";
+  summary     "rules that do an app's own work when something happens — a trigger from any event about the record or the hourly clock, conditions on the record's own fields as the rule's author may read them (and how long it has waited), and steps that are the app's own [Action] functions with the choices they offer; run in order, as the person who saved them under their own security, loop-protected, each fire recorded; the app's rules declared in code, copied by the team or a person to change them (restorable, lockable).";
+  model "model/**/*.osy";
+  use Osysharp.Identity@0;
+  // The hourly clock is a workflow.
+  use Osysharp.Workflow;
+  // The rules page, the editor and the history — themed by the app.
+  use Osysharp.Ui;
+  tests "tests";
+}

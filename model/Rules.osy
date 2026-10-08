@@ -1,0 +1,392 @@
+namespace Osysharp.Automations;
+
+using Osysharp.Identity;
+
+// THE RULES — the team's and each person's, as rows. The app's own are not rows: they are read from its code every
+// time, so an app update reaches them. A row with `Replaces` is a COPY of an app's rule: it takes that rule's place, for
+// everyone (the team's copy) or for what one person holds (theirs), and deleting it restores the app's.
+//
+// ⚑ A RULE RUNS AS WHOEVER SAVED IT. Saving records the saver's consent to each step (`Actions.Consent`), sealed by the
+//   platform for that person and that step alone — so editing somebody else's rule makes it the editor's, and nothing
+//   can make a rule run as somebody who did not save it. SECURITY-INVARIANT(an-automation-runs-as-who-saved-it), guarded
+//   by tests/rules.test.osy `a_rule_runs_as_whoever_saved_it_under_their_own_rules`.
+
+/// Whose rule it is. ⚠ Appended, never inserted: an enum is stored by position.
+public enum AutomationLayer {
+  /// Everybody's — kept by whoever keeps the team's rules.
+  [Label("The team's")] Team,
+  /// One person's own, on what they hold.
+  [Label("Yours")] Personal,
+}
+
+/// One rule of the team's or of one person — or a copy of one of the app's.
+[Authority(Extensible)]
+public entity AutomationRule {
+  /// The record type it is about, by full name.
+  [Required, MaxLength(200)] string Subject;
+  [Required("Name the rule — it is what the record's history says."), MaxLength(120)] string Name;
+  AutomationLayer Layer = AutomationLayer.Team;
+  /// Who saved it last — the person it runs as, and whose rule a personal one is.
+  [Required] Principal Owner;
+  /// The event it runs on, by class; none for an hourly rule.
+  [MaxLength(200)] string When = "";
+  /// Checked by the hourly clock, on what the subject is watching.
+  bool Hourly;
+  /// The app's rule this copy replaces — "" for a rule of its own.
+  [MaxLength(80)] string Replaces = "";
+  /// The app's rule as it was when copied, so the copy can say the original has changed since.
+  [MaxLength(64)] string CopiedFrom = "";
+  /// Where it runs among its layer's rules.
+  int Position;
+  /// Switched off — a copy that is off turns the app's rule off for whoever it replaces it for.
+  bool Off;
+  DateTime ChangedAt;
+  security {
+    allow read when RunsAutomations where Layer == AutomationLayer.Team || Owner == user;
+    allow create, update, delete when RunsAutomations where Layer == AutomationLayer.Personal && Owner == user;
+    allow create, update, delete when ManagesAutomations where Layer == AutomationLayer.Team;
+    // The saver is the owner — nobody puts somebody else's name on a rule.
+    deny create, update when IsAuthenticated where Owner != user;
+  }
+}
+
+/// One condition of a rule — all must hold.
+[Authority(Extensible)]
+public entity AutomationTest {
+  [Required] AutomationRule Rule;
+  int Position;
+  /// A condition's key — a field's name, or one the app computes.
+  [Required, MaxLength(80)] string Condition;
+  ConditionOp Op;
+  [MaxLength(500)] string Value = "";
+  /// "Status is Waiting" — as it read when chosen, so one whose condition or choice has gone can say what it was.
+  [MaxLength(300)] string Label = "";
+  security {
+    allow read when RunsAutomations where Rule.Layer == AutomationLayer.Team || Rule.Owner == user;
+    allow create, update, delete when RunsAutomations where Rule.Layer == AutomationLayer.Personal && Rule.Owner == user;
+    allow create, update, delete when ManagesAutomations where Rule.Layer == AutomationLayer.Team;
+  }
+}
+
+/// One step of a rule — an `[Action]` of the app, the values it was given, and its saver's consent to run it as them.
+[Authority(Extensible)]
+public entity AutomationStep {
+  [Required] AutomationRule Rule;
+  int Position;
+  /// The action's name (`ActionInfo.Name`).
+  [Required, MaxLength(200)] string Action;
+  /// The values it was given, as `[["parameter","value"], …]` — the record it runs on is added when it runs.
+  [MaxLength(4000)] string Values = "";
+  /// "Set priority: Urgent" — as it read when chosen.
+  [MaxLength(300)] string Label = "";
+  /// The saver's consent to run this step, with these values, as them (`Actions.Consent`).
+  [MaxLength(4000)] string Consent = "";
+  security {
+    allow read when RunsAutomations where Rule.Layer == AutomationLayer.Team || Rule.Owner == user;
+    allow create, update, delete when RunsAutomations where Rule.Layer == AutomationLayer.Personal && Rule.Owner == user;
+    allow create, update, delete when ManagesAutomations where Rule.Layer == AutomationLayer.Team;
+    deny read Consent;
+  }
+}
+
+/// One of the app's rules, locked by whoever keeps the team's: no copy replaces it while it is locked, the team's or a
+/// person's — the app's rule runs, as written.
+[Unique(Subject, Default)]
+public entity AutomationLock {
+  [Required, MaxLength(200)] string Subject;
+  [Required, MaxLength(80)] string Default;
+  [Required] Principal By;
+  DateTime At;
+  security {
+    allow read when RunsAutomations;
+    allow create, delete when ManagesAutomations;
+    deny create when IsAuthenticated where By != user;
+  }
+}
+
+// ── what a rule is, whoever's it is ───────────────────────────────────────────────────────────────────────────────────
+
+/// A rule as it runs — the app's (`Default` set), or a row of the team's or a person's (`Row` set).
+public class RuleToRun {
+  /// "default:<key>" or "rule:<id>" — what loop protection and the hourly clock know a rule by.
+  public string Key = "";
+  public string Name = "";
+  /// The app's rule it is, or replaces — "" for a rule of its own.
+  public string Default = "";
+  public Guid? Row;
+  /// Null for the app's own.
+  public AutomationLayer? Layer;
+  public string When = "";
+  public bool Hourly;
+  public bool Off;
+  public List<AutomationTestSpec> Tests = [];
+  public List<RuleStepToRun> Steps = [];
+}
+
+public class RuleStepToRun {
+  public string Action = "";
+  public List<ActionValue> Values = [];
+  public string Label = "";
+  /// The saver's consent — none for the app's own rule, which runs with the app's authority.
+  public string Consent = "";
+}
+
+/// Whether the app's rule `defaultKey` is locked — by the app's code or by whoever keeps the team's rules.
+public bool IsLocked(AutomationSubjectBase subject, string defaultKey) {
+  var d = subject.Defaults().FirstOrDefault(x => x.Key == defaultKey);
+  if (d != null && d.Locked) { return true; }
+  var key = subject.Record;
+  return AutomationLock.Any(l => l.Subject == key && l.Default == defaultKey);
+}
+
+/// The rules that run on `record`, in order: each of the app's (or the copy that takes its place — a person's copy on
+/// what they hold, else the team's; never while it is locked), then the team's own, then the holder's own.
+///
+/// ⚑ THE SCOPE OF A COPY IS THE WHOLE POINT. The team's copy replaces the app's rule for everybody; a person's copy
+///   replaces it only on what THEY hold (`HolderOf`), and for everybody else the team's (or the app's) still runs.
+///   SECURITY-INVARIANT(a-copy-replaces-only-for-its-scope), guarded by tests/layers.test.osy
+///   `a_persons_copy_replaces_the_apps_rule_only_on_what_they_hold`.
+public List<RuleToRun> RulesFor(AutomationSubjectBase subject, Entity record) {
+  var holder = subject.HolderOf(record);
+  Guid? who = null;
+  if (holder != null) { who = holder!.Id; }
+  return RulesFrom(subject, SavedRulesOf(subject.Record, who));
+}
+
+/// The rules that run, in order, from what is saved for the subject: each of the app's (or the copy in its place), then
+/// the team's own, then the holder's own.
+List<RuleToRun> RulesFrom(AutomationSubjectBase subject, SavedRules saved) {
+  List<RuleToRun> rules = [];
+  foreach (var d in subject.Defaults()) {
+    var locked = d.Locked || saved.Locks.Contains(d.Key);
+    var personal = locked ? null : saved.Mine.FirstOrDefault(r => r.Replaces == d.Key);
+    var teams = locked ? null : saved.Team.FirstOrDefault(r => r.Replaces == d.Key);
+    if (personal != null) { rules.Add(FromRow(personal!, saved.Parts)); }
+    else if (teams != null) { rules.Add(FromRow(teams!, saved.Parts)); }
+    else { rules.Add(FromDefault(d)); }
+  }
+  foreach (var r in saved.Team.Where(x => x.Replaces == "")) { rules.Add(FromRow(r, saved.Parts)); }
+  foreach (var r in saved.Mine.Where(x => x.Replaces == "")) { rules.Add(FromRow(r, saved.Parts)); }
+  return rules;
+}
+
+/// What is saved about one subject's rules for one holder: its locks, the team's rules, the holder's own, and their
+/// conditions and steps.
+public class SavedRules {
+  public List<string> Locks = [];
+  public List<AutomationRule> Team = [];
+  public List<AutomationRule> Mine = [];
+  public RuleParts Parts = new RuleParts();
+}
+
+/// One subject's saved rules for the record's holder (none: the team's alone) — a read each of the locks, the team's
+/// rules, the holder's and the conditions and steps of all of them, however many rules there are.
+///
+/// ⚑ READ ONCE FOR A DELIVERY (`[OncePerDelivery]`): the events one commit raised — a ticket arrives, is queued, is
+///   assigned — are delivered together, and their rules are read once between them, not once each.
+[OncePerDelivery]
+[SuppressWarning("cost-unbounded-read")]   // one subject's locks and rules — the team's and the holder's own
+public SavedRules SavedRulesOf(string subject, Guid? holder) {
+  var saved = new SavedRules();
+  saved.Locks = AutomationLock.Where(l => l.Subject == subject).Select(l => l.Default).ToList();
+  saved.Team = AutomationRule.Where(r => r.Subject == subject && r.Layer == AutomationLayer.Team).OrderBy(r => r.Position).ToList();
+  if (holder != null) {
+    var who = holder.Value;
+    saved.Mine = AutomationRule.Where(r => r.Subject == subject && r.Layer == AutomationLayer.Personal && r.Owner.Id == who)
+      .OrderBy(r => r.Position).ToList();
+  }
+  saved.Parts = RulePartsOf(saved.Team, saved.Mine);
+  return saved;
+}
+
+/// The conditions and the steps of a set of rules, each in its order.
+public class RuleParts {
+  public List<AutomationTest> Tests = [];
+  public List<AutomationStep> Steps = [];
+}
+
+/// The conditions and steps of `team` and `mine` — ONE read of each, however many rules there are. `RulesFor` runs on
+/// every event and on every watched record each hour, so a read per rule would be paid that often for each rule the
+/// team writes.
+[SuppressWarning("cost-unbounded-read")]   // the conditions and steps of the rules in hand — the team's and one person's
+RuleParts RulePartsOf(List<AutomationRule> team, List<AutomationRule> mine) {
+  var parts = new RuleParts();
+  var ids = team.Select(r => r.Id).ToList();
+  foreach (var r in mine) { ids.Add(r.Id); }
+  if (ids.Count == 0) { return parts; }
+  parts.Tests = AutomationTest.Where(x => ids.Contains(x.Rule.Id)).OrderBy(x => x.Position).ToList();
+  parts.Steps = AutomationStep.Where(x => ids.Contains(x.Rule.Id)).OrderBy(x => x.Position).ToList();
+  return parts;
+}
+
+/// The app's rule as one to run. Its steps' words are said only when a step runs (`WordsOf`): an action whose choices
+/// come from data reads them to say one, and every event about a record with rules asks for every rule.
+RuleToRun FromDefault(AutomationDefault d) {
+  var run = new RuleToRun { Key = "default:" + d.Key, Name = d.Name, Default = d.Key, When = d.When, Hourly = d.Hourly,
+                            Off = d.Off, Tests = d.If };
+  foreach (var s in d.Then) { run.Steps.Add(new RuleStepToRun { Action = s.Action, Values = s.Values }); }
+  return run;
+}
+
+/// What a step says on its rule's run — kept on a saved rule, said from the app's rule as it runs.
+string WordsOf(RuleStepToRun step, ActionInfo? info) {
+  if (step.Label != "") { return step.Label; }
+  return info == null ? step.Action : StepWords(info!, step.Values);
+}
+
+/// A row as one to run, its conditions and steps taken from `parts`.
+RuleToRun FromRow(AutomationRule r, RuleParts parts) {
+  var id = r.Id;
+  var run = new RuleToRun { Key = "rule:" + id.ToString(), Name = r.Name, Default = r.Replaces, Row = id, Layer = r.Layer,
+                            When = r.When, Hourly = r.Hourly, Off = r.Off };
+  foreach (var t in parts.Tests.Where(x => x.Rule.Id == id)) {
+    run.Tests.Add(new AutomationTestSpec { Condition = t.Condition, Op = t.Op, Value = t.Value });
+  }
+  foreach (var s in parts.Steps.Where(x => x.Rule.Id == id)) {
+    run.Steps.Add(new RuleStepToRun { Action = s.Action, Values = ValuesOf(s.Values), Label = s.Label, Consent = s.Consent });
+  }
+  return run;
+}
+
+/// `[["priority","Urgent"]]` → the values.
+public List<ActionValue> ValuesOf(string json) {
+  List<ActionValue> values = [];
+  if (json.Trim() == "") { return values; }
+  foreach (var pair in JsonSerializer.Deserialize<List<List<string>>>(json)) {
+    if (pair.Count == 2) { values.Add(new ActionValue { Parameter = pair[0], Value = pair[1] }); }
+  }
+  return values;
+}
+
+/// The values as stored.
+public string ValuesText(List<ActionValue> values) {
+  List<List<string>> pairs = [];
+  foreach (var v in values) { pairs.Add([v.Parameter, v.Value]); }
+  return JsonSerializer.Serialize(pairs);
+}
+
+// ── words ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// "Set priority: Urgent" — an action and what it was given, in the reader's language (a row's name is the row's own).
+public string StepWords(ActionInfo info, List<ActionValue> values) {
+  List<string> said = [];
+  foreach (var p in info.Parameters.Where(x => !x.Subject)) {
+    var v = values.FirstOrDefault(x => x.Parameter == p.Name);
+    if (v == null || v.Value == "") { continue; }
+    var choice = p.Choices.FirstOrDefault(c => c.Key == v.Value);
+    if (choice != null) { said.Add(choice.Label); }
+    else if (p.ChoicesFromData) {
+      var picked = Actions.Choices(info.Name, p.Name).FirstOrDefault(c => c.Key == v.Value);
+      said.Add(picked != null ? picked.Label : v.Value);
+    } else if (p.Kind == ActionParameterKind.YesNo) { said.Add(v.Value == "true" ? "yes" : "no"); }
+    else { said.Add("“" + v.Value + "”"); }
+  }
+  return said.Count == 0 ? info.Label : info.Label + ": " + string.Join(", ", said);
+}
+
+/// "Status is Waiting", "Hours in its status is at least 24" — a condition as a person reads it.
+public string TestWords(AutomationSubjectBase subject, AutomationTestSpec t) {
+  return TestWordsIn(ConditionsOf(subject), t);
+}
+
+/// `TestWords`, against conditions already in hand — a page saying many reads them once.
+public string TestWordsIn(List<AutomationCondition> conditions, AutomationTestSpec t) {
+  var c = conditions.FirstOrDefault(x => x.Key == t.Condition);
+  if (c == null) { return t.Condition + " (no longer offered)"; }
+  var value = t.Value;
+  if (c.Kind == ConditionKind.Choice) {
+    var choice = c.Choices().FirstOrDefault(x => x.Key == t.Value);
+    value = choice != null ? choice.Label : t.Value;
+  } else if (c.Kind == ConditionKind.Flag) {
+    var flag = c.Label;
+    return t.Value == "true" ? flag : Translate($"{flag}: no");
+  } else if (c.Kind == ConditionKind.Text) {
+    value = "“" + t.Value + "”";
+  }
+  var label = c.Label;
+  var op = t.Op.Label;
+  return Translate($"{label} {op} {value}");
+}
+
+/// "When a job is placed", "Every hour" — a rule's trigger as a person reads it: its event's label.
+public string WhenWords(AutomationSubjectBase subject, string when, bool hourly) {
+  if (hourly) { return Translate("Every hour"); }
+  var info = Events.Catalog().FirstOrDefault(e => e.Type == when);
+  var words = info == null ? "" : info!.Label;
+  if (words == "") { return Translate("When it happens"); }
+  // The trigger's own label, read as the middle of a sentence ("A ticket arrives" → "When a ticket arrives").
+  var trigger = words.Substring(0, 1).ToLower() + words.Substring(1);
+  return Translate($"When {trigger}");
+}
+
+/// What could not run as written, before it is saved — "" when it is right. Each step's action must be one this subject
+/// offers, each value one its parameter takes; each condition one the READER may ask (`ConditionsOf`: a field they may
+/// not read is not one), with an operator that fits it.
+///
+/// SECURITY-INVARIANT(a-rule-asks-only-what-its-author-may-read): a condition on a field its author may not read is
+/// refused when the rule is saved — or a rule that fires (or not) would tell them the field. Guarded by
+/// tests/running.test.osy `a_derived_condition_offers_only_fields_the_author_may_read`.
+public string RuleProblem(AutomationSubjectBase subject, string when, bool hourly, List<AutomationTestSpec> tests,
+                          List<AutomationStepSpec> steps) {
+  if (!hourly && !TriggersOf(subject).Any(e => e.Type == when)) { return "Choose when it runs."; }
+  var conditions = ConditionsOf(subject);
+  if (hourly && !tests.Any(t => conditions.Any(c => c.Key == t.Condition && c.Kind == ConditionKind.Hours))) {
+    return "An hourly rule asks how long something has waited — add a condition on hours.";
+  }
+  foreach (var t in tests) {
+    var c = conditions.FirstOrDefault(x => x.Key == t.Condition);
+    if (c == null) { return $"“{t.Condition}” is not something a rule here can ask."; }
+    if (!OpFits(c!.Kind, t.Op)) { return $"“{c.Label}” cannot be compared with “{t.Op.Label}”."; }
+    if (c.Kind == ConditionKind.Choice && !c.Choices().Any(x => x.Key == t.Value)) {
+      return $"Choose what “{c.Label}” is.";
+    }
+    if ((c.Kind == ConditionKind.Number || c.Kind == ConditionKind.Hours) && !IsNumber(t.Value)) {
+      return $"“{c.Label}” is compared with a number.";
+    }
+  }
+  if (steps.Count == 0) { return "A rule does something — add a step."; }
+  foreach (var s in steps) {
+    var info = Actions.Find(s.Action);
+    if (info == null || info!.Subject != subject.Record || !subject.Offers(info!)) {
+      return $"“{s.Action}” is not something a rule here can do.";
+    }
+    foreach (var p in info!.Parameters.Where(x => !x.Subject)) {
+      var v = s.Values.FirstOrDefault(x => x.Parameter == p.Name);
+      if ((v == null || v.Value == "") && !p.Optional) { return $"Choose {p.Label.ToLower()} for “{info.Label}”."; }
+      if (v != null && v.Value != "" && p.Kind == ActionParameterKind.Choice && !p.Choices.Any(c => c.Key == v.Value)) {
+        return $"“{v.Value}” is not one of the choices for {p.Label.ToLower()}.";
+      }
+    }
+  }
+  return "";
+}
+
+/// Whether `op` compares a condition of `kind`.
+public bool OpFits(ConditionKind kind, ConditionOp op) {
+  if (kind == ConditionKind.Choice || kind == ConditionKind.Flag) { return op == ConditionOp.Is || op == ConditionOp.IsNot; }
+  if (kind == ConditionKind.Text) { return op != ConditionOp.AtLeast && op != ConditionOp.AtMost; }
+  return op == ConditionOp.Is || op == ConditionOp.AtLeast || op == ConditionOp.AtMost;
+}
+
+/// The operators a condition of `kind` offers, in the order a person reads them.
+public List<ConditionOp> OpsFor(ConditionKind kind) {
+  return ConditionOp.Members.Where(o => OpFits(kind, o)).ToList();
+}
+
+bool IsNumber(string s) {
+  var t = s.Trim();
+  if (t == "") { return false; }
+  var dots = 0;
+  for (var i = 0; i < t.Length; i = i + 1) {
+    var ch = t.Substring(i, 1);
+    if (ch == ".") { dots = dots + 1; continue; }
+    if (ch == "-" && i == 0) { continue; }
+    if (!"0123456789".Contains(ch)) { return false; }
+  }
+  return dots <= 1;
+}
+
+/// What an app's rule was, as a fingerprint — kept on a copy, so the copy can say the app's has changed since.
+public string Fingerprint(AutomationDefault d) {
+  return Crypto.Sha256Hex(JsonSerializer.Serialize(d));
+}

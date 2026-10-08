@@ -1,0 +1,56 @@
+// The hourly clock: an hourly rule runs on what its subject is watching, once its conditions hold — including how long
+// the job has waited — and once for each time that wait starts.
+using Osysharp.Identity;
+using Osysharp.Automations;
+using AutomationsKitTests;
+
+[Test(Shop)]
+void an_hourly_rule_runs_once_the_wait_is_long_enough_and_once_for_each_wait() {
+  TestClock.Set(new DateTime(2030, 3, 4, 9, 0, 0));
+  var poster = Place("poster");
+  runas (Ivy) { MoveJob(poster, JobStage.Ready); }
+  Background.Settle();
+  // Ready for 47 hours: not yet.
+  TestClock.Advance(TimeSpan.FromHours(47));
+  Background.Settle();
+  Assert.Equal("", JobOf(poster).Labels);
+  // 49 hours: labelled, and written down.
+  TestClock.Advance(TimeSpan.FromHours(2));
+  Background.Settle();
+  Assert.Equal("uncollected", JobOf(poster).Labels);
+  Assert.Equal(["The app's rule “Ready two days — uncollected”: Add a label: “uncollected”."], Notes(poster));
+  // Still waiting the same wait: it does not run again.
+  TestClock.Advance(TimeSpan.FromHours(5));
+  Background.Settle();
+  Assert.Equal(1, Notes(poster).Count);
+  // Collected — off the clock.
+  runas (Ivy) { MoveJob(poster, JobStage.Collected); }
+  TestClock.Advance(TimeSpan.FromHours(60));
+  Background.Settle();
+  Assert.Equal(1, Notes(poster).Count);
+}
+
+// A rule of the team's on the clock — "printing for more than a day" — with a condition on hours at most, too.
+[Test(Shop)]
+void a_teams_hourly_rule_reads_hours_at_least_and_at_most() {
+  TestClock.Set(new DateTime(2030, 3, 4, 9, 0, 0));
+  runas (Max) {
+    Rule("Stuck in printing", "", [Picked("Stage", ConditionOp.Is, JobStage.Printing.Name),
+                                   Picked("StageSince", ConditionOp.AtLeast, "24"),
+                                   Picked("StageSince", ConditionOp.AtMost, "30")],
+         [Step(Actions.Of(AddLabel), Set("label", "stuck"))], hourly: true);
+  }
+  var card = Place("card");
+  runas (Ivy) { MoveJob(card, JobStage.Printing); }
+  Background.Settle();
+  TestClock.Advance(TimeSpan.FromHours(25));
+  Background.Settle();
+  Assert.Equal("stuck", JobOf(card).Labels);
+}
+
+// The clock runs from the moment the app is loaded: its start hook (`StartTheHourlyClock`) made the one row it runs on,
+// before anything happened to any job — so no delivery has to ask whether it is running.
+[Test(Shop)]
+void the_hourly_clock_runs_from_the_moment_the_app_is_loaded() {
+  runas (Ivy) { Assert.Equal(1, AutomationWatch.Count()); }
+}

@@ -1,0 +1,76 @@
+// The print shop every test runs in: Max manages it, Ivy and Otto print. Nobody has written a rule yet — the app's two
+// are its own.
+using Osysharp.Identity;
+using Osysharp.Automations;
+using AutomationsKitTests;
+
+[TestFixture]
+void Shop() {
+  var max = new Person { Email = "max@print.test", DisplayName = "Max Berg" };
+  new RoleGrant { Member = max, Role = ShopRole.Manager };
+  var ivy = new Person { Email = "ivy@print.test", DisplayName = "Ivy Lund" };
+  new RoleGrant { Member = ivy, Role = ShopRole.Printer };
+  var otto = new Person { Email = "otto@print.test", DisplayName = "Otto Ek" };
+  new RoleGrant { Member = otto, Role = ShopRole.Printer };
+}
+
+principal Max => Person.Single(p => p.Email == "max@print.test");
+principal Ivy => Person.Single(p => p.Email == "ivy@print.test");
+principal Otto => Person.Single(p => p.Email == "otto@print.test");
+
+/// A job placed by Ivy, its rules run.
+Guid Place(string title, int copies = 1, Paper paper = Paper.Plain) {
+  Guid id = Guid.Empty;
+  runas (Ivy) { id = PlaceJob(title, copies, paper); }
+  Background.Settle();
+  return id;
+}
+
+/// A job as it now stands — read by Max (an anonymous test body reads no job at all).
+public class JobSeen {
+  public Paper Paper = Paper.Plain;
+  public string Labels = "";
+  public bool Rush;
+}
+JobSeen JobOf(Guid id) {
+  var seen = new JobSeen();
+  runas (Max) {
+    var j = Job.Single(x => x.Id == id);
+    seen.Paper = j.Paper;
+    seen.Labels = j.Labels;
+    seen.Rush = j.Rush;
+  }
+  return seen;
+}
+
+/// What the shop's history says about a job.
+List<string> Notes(Guid id) {
+  List<string> said = [];
+  runas (Max) { said = NotesOn(id); }
+  return said;
+}
+
+/// What the shop's rules are about — its jobs, by the record type's full name.
+string Jobs() { return typeof(Job).FullName; }
+
+/// A condition as a PERSON picks it in the rule editor — by its stored key. A rule a person builds is data, so a key the
+/// record does not offer is refused when the rule is SAVED; the app's own rules name a field typed (`Test(j => j.Paper, …)`).
+AutomationTestSpec Picked(string condition, ConditionOp op, string value = "") {
+  return new AutomationTestSpec { Condition = condition, Op = op, Value = value };
+}
+
+/// A step as a PERSON picks it in the rule editor — the action, and the values they chose, as text. Data, like their
+/// conditions: checked when the rule is SAVED. The app's own rules call the action typed (`Run(j => UsePaper(j, …))`).
+AutomationStepSpec Step(ActionInfo action, params ActionValue[] values) {
+  return new AutomationStepSpec { Action = action.Name, Values = values.ToList() };
+}
+
+/// A value a person chose for one of an action's parameters.
+ActionValue Set(string parameter, string value) { return new ActionValue { Parameter = parameter, Value = value }; }
+
+/// A rule of the team's or one person's, saved as whoever runs it.
+Guid Rule(string name, string when, List<AutomationTestSpec> tests, List<AutomationStepSpec> steps,
+          AutomationLayer layer = AutomationLayer.Team, bool hourly = false) {
+  return SaveRule(new RuleDraft { Subject = Jobs(), Name = name, Layer = layer, When = when, Hourly = hourly,
+                                  Tests = tests, Steps = steps });
+}

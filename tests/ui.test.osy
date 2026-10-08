@@ -1,0 +1,106 @@
+// THE RULES ON SCREEN — driven as the shop's manager and a printer keep them: the list in the order the rules run, a
+// rule written in the editor (when, only if, then), the app's rule copied for the team and for one printer, locked and
+// restored, and what ran on the history — wide and on a phone, light and dark. `osy test --pixels` photographs each.
+using Osysharp.Identity;
+using Osysharp.Automations;
+using AutomationsKitTests;
+
+[Test(Shop)]
+void the_rules_page_lists_every_rule_in_the_order_they_run() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Max);
+  Ui.Visit("/settings/automations");
+  Assert.Visible("Rules, in the order they run");
+  Assert.Visible("Big runs go on recycled paper");
+  Assert.Visible("Ready two days — uncollected");
+  Assert.Visible("Nothing has run yet");
+  Ui.Shot("rules-empty-history-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("rules-empty-history-wide-dark");
+  Ui.Theme("light");
+  Ui.Viewport(390, 844);
+  Ui.Shot("rules-phone-light");
+}
+
+[Test(Shop)]
+void a_rule_is_written_in_the_editor_when_then() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Max);
+  Ui.Visit("/settings/automations");
+  Ui.Click("Add a rule");
+  Ui.Fill("Name", "Bulk jobs are labelled");
+  Ui.Select("When", On<JobPlaced>());
+  Ui.Click("Add a condition");
+  Ui.Select("Asks", "Copies");
+  Ui.Select("Compared", ConditionOp.AtLeast);
+  Ui.Fill("Value", "100");
+  Ui.Click("Add the condition");
+  Ui.Click("Add a step");
+  Ui.Select("Does", "AutomationsKitTests.AddLabel");
+  Ui.Click("Choose");
+  Ui.Fill("Label", "bulk");
+  Ui.Click("Add the step");
+  Assert.Visible("Copies is at least 100");
+  Assert.Visible("Add a label: “bulk”");
+  Ui.Shot("editor-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("editor-wide-dark");
+  Ui.Theme("light");
+  Ui.Click("Save");
+  Assert.Visible("“Bulk jobs are labelled” saved.");
+  Assert.Visible("Add a label: “bulk”", within: "Bulk jobs are labelled — the team's");
+  // …and it runs.
+  var flyers = Place("flyers", copies: 200);
+  Assert.Equal("bulk", JobOf(flyers).Labels);
+}
+
+[Test(Shop)]
+void the_apps_rule_is_copied_for_the_team_and_for_one_printer_locked_and_restored() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Max);
+  Ui.Visit("/settings/automations");
+  Ui.Click("Copy for the team", within: "Big runs go on recycled paper — the app's");
+  Assert.Visible("Copied for the team");
+  Assert.Visible("The team's copy replaces it");
+  Ui.Shot("layers-team-copy-wide-light");
+  Ui.Click("Lock", within: "Ready two days — uncollected — the app's");
+  Assert.Visible("Locked — nobody replaces it");
+  Ui.Shot("layers-locked-wide-light");
+  // A printer: the team's copy is read-only to her, and she keeps her own copy of what she may.
+  Ui.SignInAs(Ivy);
+  Ui.Visit("/settings/automations");
+  Ui.Click("Copy for mine", within: "Big runs go on recycled paper — the app's");
+  Assert.Visible("Your copy replaces it on yours");
+  Ui.Shot("layers-personal-copy-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("layers-personal-copy-wide-dark");
+  Ui.Theme("light");
+  Ui.Viewport(390, 844);
+  Ui.Shot("layers-personal-copy-phone-light");
+  Ui.Viewport(1440, 900);
+  Ui.Click("Restore", within: "Big runs go on recycled paper — yours");
+  Assert.Visible("Restored the app's rule.");
+}
+
+[Test(Shop)]
+void what_ran_is_on_the_history_and_says_what_it_did() {
+  var posters = Place("posters", copies: 600);
+  runas (Max) {
+    Rule("Gloss goes plain", On<JobChanged>(), [Picked("Paper", ConditionOp.Is, Paper.Gloss.Name)],
+         [Step(Actions.Of(UsePaper), Set("paper", Paper.Plain.Name))]);
+    Rule("Plain goes gloss", On<JobChanged>(), [Picked("Paper", ConditionOp.Is, Paper.Plain.Name)],
+         [Step(Actions.Of(UsePaper), Set("paper", Paper.Gloss.Name))]);
+  }
+  var cards = Place("cards", paper: Paper.Gloss);
+  runas (Ivy) { MoveJob(cards, JobStage.Printing); }
+  Background.Settle();
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Max);
+  Ui.Visit("/settings/automations");
+  Assert.Visible("What ran lately");
+  Assert.Visible("The app's rule “Big runs go on recycled paper”: Use paper: Recycled.");
+  Assert.Visible("was stopped: It already ran on this");
+  Ui.Shot("history-wide-light");
+  Ui.Theme("dark");
+  Ui.Shot("history-wide-dark");
+}

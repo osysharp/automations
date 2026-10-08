@@ -1,0 +1,171 @@
+// Running: a rule runs on its trigger when its conditions hold, in order, as whoever saved it, once per chain of its own
+// making — and every run, or stop, is written on the job.
+using Osysharp.Identity;
+using Osysharp.Automations;
+using AutomationsKitTests;
+
+[Test(Shop)]
+void the_apps_rule_runs_on_its_trigger_when_its_conditions_hold() {
+  var posters = Place("posters", copies: 600);
+  Assert.Equal(Paper.Recycled, JobOf(posters).Paper);
+  Assert.Equal(["The app's rule “Big runs go on recycled paper”: Use paper: Recycled."], Notes(posters));
+}
+
+/// ⭐ A RULE SAVED NOW RUNS ON THE VERY NEXT EVENT. No rule is on "A job changes" at first, so the kit does not care about
+/// a change and it is not even written; saving a rule on it changes what the kit cares about, and the very next change
+/// runs it. A stale answer would be a rule that silently never fires.
+///
+/// ⚠ The first rule is saved BEFORE any job, so the hourly clock is already running when the kit is first asked what it
+///   cares about — and its answer is the narrow one (until the clock starts it cares about every event, which would hide
+///   a stale answer).
+[Test(Shop)]
+void a_rule_saved_now_runs_on_the_very_next_event() {
+  runas (Max) { Rule("Ready jobs are labelled", On<JobReady>(), [], [Step(Actions.Of(AddLabel), Set("label", "ready"))]); }
+  var job = Place("flyers");
+  runas (Max) { MarkRush(Job.Single(x => x.Id == job), true); }
+  Background.Settle();
+  Assert.Equal("", JobOf(job).Labels);
+  runas (Max) { Rule("Changes are labelled", On<JobChanged>(), [], [Step(Actions.Of(AddLabel), Set("label", "changed"))]); }
+  runas (Max) { MarkRush(Job.Single(x => x.Id == job), false); }
+  Background.Settle();
+  Assert.Equal("changed", JobOf(job).Labels);
+}
+
+[Test(Shop)]
+void a_rule_whose_conditions_do_not_hold_does_not_run() {
+  var flyers = Place("flyers", copies: 40);
+  Assert.Equal(Paper.Plain, JobOf(flyers).Paper);
+  Assert.Equal(0, Notes(flyers).Count);
+}
+
+// Rules run in order, and each reads what the one before it did: the app's rule puts a big run on recycled paper, and
+// the team's rule after it labels a job on recycled paper.
+[Test(Shop)]
+void rules_run_in_order_and_each_reads_what_the_one_before_did() {
+  runas (Max) {
+    Rule("Recycled is labelled eco", On<JobPlaced>(), [Picked("Paper", ConditionOp.Is, Paper.Recycled.Name)],
+         [Step(Actions.Of(AddLabel), Set("label", "eco"))]);
+  }
+  var posters = Place("posters", copies: 600);
+  Assert.Equal("eco", JobOf(posters).Labels);
+  Assert.Equal(2, Notes(posters).Count);
+  Assert.Equal("Rule “Recycled is labelled eco” (as Max Berg): Add a label: “eco”.", Notes(posters)[1]);
+}
+
+// SECURITY-INVARIANT(an-automation-never-loops) — two rules that undo each other: A sets plain on a gloss job, B sets
+// gloss on a plain one. Each runs once; the third turn (A again, on what B did because of A) is stopped and written down.
+[Test(Shop)]
+void two_rules_that_undo_each_other_each_run_once_and_the_loop_is_on_the_record() {
+  runas (Max) {
+    Rule("Gloss goes plain", On<JobChanged>(), [Picked("Paper", ConditionOp.Is, Paper.Gloss.Name)],
+         [Step(Actions.Of(UsePaper), Set("paper", Paper.Plain.Name))]);
+    Rule("Plain goes gloss", On<JobChanged>(), [Picked("Paper", ConditionOp.Is, Paper.Plain.Name)],
+         [Step(Actions.Of(UsePaper), Set("paper", Paper.Gloss.Name))]);
+  }
+  var cards = Place("cards", copies: 50, paper: Paper.Gloss);
+  runas (Ivy) { MoveJob(cards, JobStage.Printing); }
+  Background.Settle();
+  var notes = Notes(cards);
+  Assert.Equal(3, notes.Count);
+  Assert.Equal("Rule “Gloss goes plain” (as Max Berg): Use paper: Plain.", notes[0]);
+  Assert.Equal("Rule “Plain goes gloss” (as Max Berg): Use paper: Gloss.", notes[1]);
+  Assert.StartsWith("Rule “Gloss goes plain” was stopped: It already ran on this", notes[2]);
+  Assert.Equal(Paper.Gloss, JobOf(cards).Paper);
+}
+
+// SECURITY-INVARIANT(an-automation-runs-as-who-saved-it) — a rule runs as the person who saved it, under their own rules:
+// Ivy's rule marks her printing job a rush, which only the manager may do, so it is refused and says so; Max's does it.
+[Test(Shop)]
+void a_rule_runs_as_whoever_saved_it_under_their_own_rules() {
+  var banner = Place("banner");
+  runas (Ivy) {
+    Rule("My printing jobs are rushed", On<JobChanged>(), [Picked("Stage", ConditionOp.Is, JobStage.Printing.Name)],
+         [Step(Actions.Of(MarkRush), Set("rush", "true"))], layer: AutomationLayer.Personal);
+    TakeJob(banner);
+    MoveJob(banner, JobStage.Printing);
+  }
+  Background.Settle();
+  Assert.False(JobOf(banner).Rush);
+  Assert.StartsWith("Rule “My printing jobs are rushed” (as Ivy Lund) did nothing: “Mark it a rush: yes” was not done:", Notes(banner)[0]);
+  runas (Max) {
+    Rule("Ready jobs are rushed", On<JobReady>(), [], [Step(Actions.Of(MarkRush), Set("rush", "true"))]);
+  }
+  runas (Ivy) { MoveJob(banner, JobStage.Ready); }
+  Background.Settle();
+  Assert.True(JobOf(banner).Rush);
+  Assert.Equal("Rule “Ready jobs are rushed” (as Max Berg): Mark it a rush: yes.", Notes(banner)[1]);
+}
+
+// Nothing that is not an `[Action]` can be a step — the shop's `PlaceJob` is an ordinary function.
+[Test(Shop)]
+void nothing_but_an_action_can_be_a_step() {
+  runas (Max) {
+    var ex = Assert.Throws<ValidationException>(() =>
+      Rule("Place another", On<JobPlaced>(), [], [new AutomationStepSpec { Action = "AutomationsKitTests.PlaceJob" }]));
+    Assert.Equal("“AutomationsKitTests.PlaceJob” is not something a rule here can do.", ex.Message);
+  }
+}
+
+[Test(Shop)]
+void a_rule_that_could_not_run_as_written_is_refused_when_saved() {
+  runas (Max) {
+    Assert.Equal("Choose when it runs.",
+      Assert.Throws<ValidationException>(() => Rule("x", "Nope", [], [Step(Actions.Of(AddLabel), Set("label", "a"))])).Message);
+    Assert.Equal("A rule does something — add a step.",
+      Assert.Throws<ValidationException>(() => Rule("x", On<JobPlaced>(), [], [])).Message);
+    Assert.Equal("Choose label for “Add a label”.",
+      Assert.Throws<ValidationException>(() => Rule("x", On<JobPlaced>(), [], [Step(Actions.Of(AddLabel))])).Message);
+    Assert.Equal("An hourly rule asks how long something has waited — add a condition on hours.",
+      Assert.Throws<ValidationException>(() => Rule("x", "", [], [Step(Actions.Of(AddLabel), Set("label", "a"))], hourly: true)).Message);
+    Assert.Equal("“Copies” cannot be compared with “contains”.",
+      Assert.Throws<ValidationException>(() => Rule("x", On<JobPlaced>(), [Picked("Copies", ConditionOp.Contains, "5")],
+        [Step(Actions.Of(AddLabel), Set("label", "a"))])).Message);
+  }
+}
+
+// Who keeps what: a person's rules are their own, and only the manager keeps the team's.
+[Test(Shop)]
+void a_persons_rules_are_their_own_and_only_the_manager_keeps_the_teams() {
+  runas (Ivy) {
+    Rule("Mine", On<JobPlaced>(), [], [Step(Actions.Of(AddLabel), Set("label", "ivy"))], layer: AutomationLayer.Personal);
+    Assert.Throws<Exception>(() => Rule("Everyone's", On<JobPlaced>(), [], [Step(Actions.Of(AddLabel), Set("label", "all"))]));
+  }
+  runas (Otto) { Assert.Equal(0, AutomationRule.Count()); }
+  runas (Max) { Assert.Equal(0, AutomationRule.Count()); }
+  runas (Ivy) { Assert.Equal(1, AutomationRule.Count()); }
+}
+
+// SECURITY-INVARIANT(a-rule-asks-only-what-its-author-may-read) — what a rule may ask of a job is the job's own fields, as
+// the rule's AUTHOR may read them: Ivy, a printer, is not offered what a job cost (the manager's to read), and a rule of
+// hers that asks it is refused — or a rule that fired, or did not, would tell her. Nobody is offered a field the shop
+// marked `[NotInRules]`.
+[Test(Shop)]
+void a_derived_condition_offers_only_fields_the_author_may_read() {
+  runas (Ivy) {
+    var asks = ConditionChoices(Jobs()).Select(c => c.Key).ToList();
+    Assert.Contains("Copies", asks);
+    Assert.Contains("Paper", asks);
+    Assert.DoesNotContain("Cost", asks);
+    Assert.DoesNotContain("LedgerRef", asks);
+    Assert.Equal("“Cost” is not something a rule here can ask.",
+      Assert.Throws<ValidationException>(() => Rule("Costly", On<JobPlaced>(), [Picked("Cost", ConditionOp.AtLeast, "100")],
+        [Step(Actions.Of(AddLabel), Set("label", "costly"))], layer: AutomationLayer.Personal)).Message);
+  }
+  runas (Max) {
+    var asks = ConditionChoices(Jobs()).Select(c => c.Key).ToList();
+    Assert.Contains("Cost", asks);
+    Assert.DoesNotContain("LedgerRef", asks);
+  }
+}
+
+/// An app's own step is an `[Action]` called on the rule's record, with its values fixed when the rule is written; it
+/// reads as the action and its values, as text. A call of something that is not an action, or a value that reads the
+/// record, does not compile (`Run`'s `[ActionStep]` — guarded by TypedRuleStepsAndValuesTests, since a test file that
+/// wrote one could not compile either).
+[Test(Shop)]
+void a_shipped_step_reads_as_its_action_and_values() {
+  var rules = new AutomationsKitTests.JobRules();
+  var step = rules.Run(j => UsePaper(j, Paper.Gloss));
+  Assert.Equal("AutomationsKitTests.UsePaper", step.Action);
+  Assert.Equal("paper=Gloss", string.Join(",", step.Values.Select(v => v.Parameter + "=" + v.Value)));
+}

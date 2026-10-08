@@ -1,0 +1,129 @@
+// The three layers: the app's rules from its code; the team's copy, which replaces one for everybody; a person's copy,
+// which replaces one only on what they hold. Restoring a copy brings the app's back; a locked rule is never replaced.
+using Osysharp.Identity;
+using Osysharp.Automations;
+using AutomationsKitTests;
+
+/// The copy of the app's rule `defaultKey` in `layer`, as its keeper sees it.
+Guid CopyOf(string defaultKey) {
+  Guid id = Guid.Empty;
+  id = AutomationRule.Single(r => r.Replaces == defaultKey).Id;
+  return id;
+}
+
+/// The app's rule, copied and changed: its step now sets `paper`.
+void ChangeCopy(Guid id, Paper paper) {
+  var draft = DraftOf(Jobs(), "rule:" + id.ToString());
+  draft.Steps = [Step(Actions.Of(UsePaper), Set("paper", paper.Name))];
+  SaveRule(draft);
+}
+
+[Test(Shop)]
+void the_teams_copy_replaces_the_apps_rule_for_everyone_and_restoring_it_brings_the_apps_back() {
+  runas (Max) {
+    CopyRule(Jobs(), "big-runs-recycled", AutomationLayer.Team);
+    ChangeCopy(CopyOf("big-runs-recycled"), Paper.Gloss);
+  }
+  var posters = Place("posters", copies: 600);
+  Assert.Equal(Paper.Gloss, JobOf(posters).Paper);
+  Assert.Equal("Rule “Big runs go on recycled paper” (as Max Berg): Use paper: Gloss.", Notes(posters)[0]);
+  // The list says what replaces what.
+  runas (Max) {
+    var line = RuleLines(Jobs()).Single(l => l.Key == "default:big-runs-recycled");
+    Assert.Contains("The team's copy replaces it", line.Notes);
+    RemoveRule(CopyOf("big-runs-recycled"));
+  }
+  var leaflets = Place("leaflets", copies: 900);
+  Assert.Equal(Paper.Recycled, JobOf(leaflets).Paper);
+}
+
+// An app's rule shipped switched off is not listened for — a job made ready raises no event and no run (SP-73) — until the
+// team switches it on, which saves a copy, and saving listens: from then on it runs.
+[Test(Shop)]
+void a_rule_shipped_off_runs_once_the_team_switches_it_on() {
+  var menus = Place("menus");
+  runas (Ivy) { MoveJob(menus, JobStage.Ready); }
+  Background.Settle();
+  Assert.Equal("", JobOf(menus).Labels);
+  runas (Max) {
+    CopyRule(Jobs(), "ready-shelved", AutomationLayer.Team);
+    SwitchRule(CopyOf("ready-shelved"), true);
+  }
+  var cards = Place("cards");
+  runas (Ivy) { MoveJob(cards, JobStage.Ready); }
+  Background.Settle();
+  Assert.Equal("shelved", JobOf(cards).Labels);
+}
+
+// A copy switched off turns the app's rule off for whoever it replaces it for.
+[Test(Shop)]
+void a_copy_switched_off_turns_the_apps_rule_off() {
+  runas (Max) {
+    CopyRule(Jobs(), "big-runs-recycled", AutomationLayer.Team);
+    SwitchRule(CopyOf("big-runs-recycled"), false);
+  }
+  var posters = Place("posters", copies: 600);
+  Assert.Equal(Paper.Plain, JobOf(posters).Paper);
+  Assert.Equal(0, Notes(posters).Count);
+}
+
+// SECURITY-INVARIANT(a-copy-replaces-only-for-its-scope) — Ivy's copy of the hourly rule labels HER uncollected jobs her
+// own way; Otto's job still gets the app's label.
+[Test(Shop)]
+void a_persons_copy_replaces_the_apps_rule_only_on_what_they_hold() {
+  TestClock.Set(new DateTime(2030, 3, 4, 9, 0, 0));
+  runas (Ivy) {
+    CopyRule(Jobs(), "uncollected", AutomationLayer.Personal);
+    var draft = DraftOf(Jobs(), "rule:" + CopyOf("uncollected").ToString());
+    draft.Steps = [Step(Actions.Of(AddLabel), Set("label", "call-ivy"))];
+    SaveRule(draft);
+  }
+  var hers = Place("hers");
+  var his = Place("his");
+  runas (Ivy) { TakeJob(hers); MoveJob(hers, JobStage.Ready); }
+  runas (Otto) { TakeJob(his); MoveJob(his, JobStage.Ready); }
+  Background.Settle();
+  TestClock.Advance(TimeSpan.FromHours(50));
+  Background.Settle();
+  Assert.Equal("call-ivy", JobOf(hers).Labels);
+  Assert.Equal("uncollected", JobOf(his).Labels);
+}
+
+// SECURITY-INVARIANT(a-locked-rule-is-never-replaced) — once Max locks it, nobody copies the app's rule, and a copy made
+// before waits: the app's rule runs as written. Unlocked, the copy is back.
+[Test(Shop)]
+void a_locked_rule_cannot_be_copied_and_its_copies_wait() {
+  runas (Max) {
+    CopyRule(Jobs(), "big-runs-recycled", AutomationLayer.Team);
+    ChangeCopy(CopyOf("big-runs-recycled"), Paper.Gloss);
+    LockRule(Jobs(), "big-runs-recycled", true);
+  }
+  runas (Ivy) {
+    var ex = Assert.Throws<ValidationException>(() => CopyRule(Jobs(), "big-runs-recycled", AutomationLayer.Personal));
+    Assert.Equal("“Big runs go on recycled paper” is locked — it runs as the app wrote it, and nobody replaces it.", ex.Message);
+  }
+  var posters = Place("posters", copies: 600);
+  Assert.Equal(Paper.Recycled, JobOf(posters).Paper);
+  runas (Max) {
+    Assert.Contains("The team's copy waits while it is locked", RuleLines(Jobs()).Single(l => l.Key == "default:big-runs-recycled").Notes);
+    LockRule(Jobs(), "big-runs-recycled", false);
+  }
+  var leaflets = Place("leaflets", copies: 900);
+  Assert.Equal(Paper.Gloss, JobOf(leaflets).Paper);
+}
+
+// What each reader may do with each rule — the list offers only what the rules allow.
+[Test(Shop)]
+void the_list_offers_each_reader_only_what_they_may_do() {
+  runas (Ivy) {
+    var line = RuleLines(Jobs()).Single(l => l.Key == "default:big-runs-recycled");
+    Assert.False(line.MayCopyForTeam);
+    Assert.True(line.MayCopyForMe);
+    Assert.False(line.MayLock);
+  }
+  runas (Max) {
+    var line = RuleLines(Jobs()).Single(l => l.Key == "default:big-runs-recycled");
+    Assert.True(line.MayCopyForTeam);
+    Assert.True(line.MayLock);
+  }
+}
