@@ -43,20 +43,27 @@ void the_rules_that_run_on_a_job_are_read_at_once_however_many_the_team_has() {
 /// ⭐ …AND SO DOES THE RULES PAGE — every line says its conditions and steps, read once for the page.
 [Test(Shop)]
 void the_rules_page_reads_the_same_however_many_rules_the_team_has() {
+  // ⚑ BOTH MEASUREMENTS ARE THE FIRST READ AFTER A RULE WAS WRITTEN. A unit of work answers a read it already sent from
+  //   what it found until something it read is written (D-SETTINGCACHE1): the page is read once here, after the team's
+  //   first rule, so who the reader is and who owns the rules are already known — and writing a rule retires only the
+  //   rule reads, for two rules and for eight alike. Measured without this: 7 statements with one rule and 6 with eight,
+  //   the one extra being the rules' owner, read only the first time.
   runas (Max) { LabelRule(1); }
-  var one = 0;
+  runas (Max) { RuleLines(Jobs()); }
+  runas (Max) { LabelRule(2); }
+  var two = 0;
   runas (Max) {
     var mark = Cost.Mark();
     RuleLines(Jobs());
-    one = Cost.StatementsSince(mark);
+    two = Cost.StatementsSince(mark);
   }
-  runas (Max) { for (var i = 2; i <= 8; i++) { LabelRule(i); } }
+  runas (Max) { for (var i = 3; i <= 8; i++) { LabelRule(i); } }
   runas (Max) {
     var mark = Cost.Mark();
     var lines = RuleLines(Jobs());
     var eight = Cost.StatementsSince(mark);
-    Log.Information("RuleLines: " + one + " statements with one rule of the team's, " + eight + " with eight");
+    Log.Information("RuleLines: " + two + " statements with two rules of the team's, " + eight + " with eight");
     Assert.Equal("Add a label: “gloss-8”", lines.Last().Then);
-    Assert.Equal(one, eight);
+    Assert.Equal(two, eight);
   }
 }
