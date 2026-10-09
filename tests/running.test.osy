@@ -160,7 +160,7 @@ void a_derived_condition_offers_only_fields_the_author_may_read() {
 
 /// An app's own step is an `[Action]` called on the rule's record, with its values fixed when the rule is written; it
 /// reads as the action and its values, as text. A call of something that is not an action, or a value that reads the
-/// record, does not compile (`Run`'s `[ActionStep]` — guarded by TypedRuleStepsAndValuesTests, since a test file that
+/// record, does not compile (`Run`'s `[ActionStep]` — guarded by the platform's own tests, since a test file that
 /// wrote one could not compile either).
 [Test(Shop)]
 void a_shipped_step_reads_as_its_action_and_values() {

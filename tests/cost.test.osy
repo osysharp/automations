@@ -44,7 +44,7 @@ void the_rules_that_run_on_a_job_are_read_at_once_however_many_the_team_has() {
 [Test(Shop)]
 void the_rules_page_reads_the_same_however_many_rules_the_team_has() {
   // ⚑ BOTH MEASUREMENTS ARE THE FIRST READ AFTER A RULE WAS WRITTEN. A unit of work answers a read it already sent from
-  //   what it found until something it read is written (D-SETTINGCACHE1): the page is read once here, after the team's
+  //   what it found until something it read is written: the page is read once here, after the team's
   //   first rule, so who the reader is and who owns the rules are already known — and writing a rule retires only the
   //   rule reads, for two rules and for eight alike. Measured without this: 7 statements with one rule and 6 with eight,
   //   the one extra being the rules' owner, read only the first time.

@@ -37,7 +37,7 @@ void the_teams_copy_replaces_the_apps_rule_for_everyone_and_restoring_it_brings_
   Assert.Equal(Paper.Recycled, JobOf(leaflets).Paper);
 }
 
-// An app's rule shipped switched off is not listened for — a job made ready raises no event and no run (SP-73) — until the
+// An app's rule shipped switched off is not listened for — a job made ready raises no event and no run — until the
 // team switches it on, which saves a copy, and saving listens: from then on it runs.
 [Test(Shop)]
 void a_rule_shipped_off_runs_once_the_team_switches_it_on() {
