@@ -6,8 +6,8 @@
     {
       "name": "Osysharp.Automations",
       "kind": "package",
-      "version": "0.6.0",
-      "hash": "sha256:f90b730a7291408cd9e96ee3e6081a0b37e4e0c5bf0b8e697121b8c0dd1b02d7",
+      "version": "0.6.1",
+      "hash": "sha256:e51780b517284d58d41bd1807cb12e762d9f42c601c8107ade282f2db3d5047f",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/automations",
@@ -16,8 +16,8 @@
     {
       "name": "Osysharp.Identity",
       "kind": "package",
-      "version": "0.7.0",
-      "hash": "sha256:a8f780ee024fb27a6c1f909feb86fec10c8a176788acd8546d1380a9243575bd",
+      "version": "0.8.0",
+      "hash": "sha256:7fadb5f2628cfd6895c44d2e88725b39055ea36c3a8276b3b345c72a931f4358",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/identity",
@@ -26,8 +26,8 @@
     {
       "name": "Osysharp.Workflow",
       "kind": "package",
-      "version": "1.0.0",
-      "hash": "sha256:c9b5bb60a8be44efc0030d73b0bd60bdab05926344a68fb4db29dc78ee94c2f8",
+      "version": "1.0.1",
+      "hash": "sha256:9f7ccf1f6dbf22b62e551b015333d41c46431491acd812fb626762531e2a97f8",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Workflow"
@@ -35,8 +35,8 @@
     {
       "name": "Osysharp.Ui",
       "kind": "package",
-      "version": "2.18.0",
-      "hash": "sha256:deccf5a06701c6af9cd880108de9426376c878130251be73adf1210cce94605b",
+      "version": "2.18.1",
+      "hash": "sha256:5dae9b4103cc649967664228cc945c2d8b5bd9ff8d45e62bf9b67d9db079545e",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Ui"

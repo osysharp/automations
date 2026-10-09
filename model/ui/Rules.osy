@@ -18,7 +18,7 @@ public class AutomationSettingsSections : ISettingsProvider {
 }
 
 /// The rules, as a settings page.
-[Page("/settings/automations")] [Layout(SettingsFrame)] [Authorize(RunsAutomations)] [Render(CSR)] [Title("Automations")]
+[Route("/settings/automations")] [Layout(SettingsFrame)] [Authorize(RunsAutomations)] [Render(CSR)] [Title("Automations")]
 public component AutomationsSettings() { render { AutomationRules(); } }
 
 /// The rules of `subject` (the app's first when none is named), the editor, and what ran lately.

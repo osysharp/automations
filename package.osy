@@ -32,7 +32,7 @@
 //     policy RunsAutomations => IsAgent;      // who sees the rules and keeps their own
 //     policy ManagesAutomations => IsAdmin;   // who keeps the team's, copies and locks the app's
 package Osysharp.Automations {
-  version     "0.6.0";
+  version     "0.6.1";
   minPlatform "0.9.0";
   summary     "rules that do an app's own work when something happens — a trigger from any event about the record or the hourly clock, conditions on the record's own fields as the rule's author may read them (and how long it has waited), and steps that are the app's own [Action] functions with the choices they offer; run in order, as the person who saved them under their own security, loop-protected, each fire recorded; the app's rules declared in code, copied by the team or a person to change them (restorable, lockable).";
   model "model/**/*.osy";
