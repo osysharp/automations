@@ -43,7 +43,7 @@ public class TicketRules : AutomationSubject<Ticket> {
 | **Three layers** | the app's rules from code (they keep the app's updates); the team's, and a team **copy** of one of the app's that replaces it for everyone; each person's own, running on what they hold, and their own copies. A copy can be **restored**; one of the app's can be **locked** so nobody replaces it |
 | **Who it runs as** | a person's rule, and the team's, as the person who saved it, under their own security when it runs — saving records their consent to each step. The app's rules run as the app |
 | **Never a loop** | a rule runs once in a chain of its own making; a rule set off again by another is stopped, a chain past `MaxChain` too — each stop written down |
-| **On the record** | every run raises `AutomationRan`, which says itself — "Rule “Refunds go high” (as Ada Lindgren): Set priority: High." — on the record's timeline (`Osysharp.Activity`) or wherever the app's own `[On]` handler writes it, and is listed under "What ran lately" for those who may read the record |
+| **On the record** | every run raises `AutomationRan`, which says itself — "Rule “Refunds go high” (as Ada Lindgren): Set priority: High." — on the record's timeline (`Osysharp.RecordTimeline`) or wherever the app's own `[On]` handler writes it, and is listed under "What ran lately" for those who may read the record |
 | **The page** | `/settings/automations` in the app's settings area: the rules in the order they run, copies under the rule they replace, the editor (when, only if, then), what ran lately |
 
 ## Its tests

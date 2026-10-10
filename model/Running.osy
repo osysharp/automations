@@ -70,7 +70,7 @@ public entity AutomationFire {
 }
 
 /// A rule ran on a record, or was stopped — what the record's history says: "Rule “Refunds go high” (as Ada Lindgren):
-/// Set priority: High." Raised for every fire, so a timeline (`Osysharp.Activity`) or the app's own history hears it.
+/// Set priority: High." Raised for every fire, so a timeline (`Osysharp.RecordTimeline`) or the app's own history hears it.
 [Event("An automation ran")]
 public sealed class AutomationRan {
   public Entity Record;
