@@ -209,7 +209,7 @@ public component AutomationRules(string subject = "") {
     SettingsPage("Automations", description: $"Rules that do the routine work on each {noun} when something happens — run in order, each run written on the {noun}. The app's own rules keep its updates; copy one to change it for the team, or for yours.") {
       if (notice != "") { Alert(notice); }
       SettingsSection("Rules, in the order they run") {
-        Stack(gap: 0, role: UiRole.List, label: "Rules") {
+        Stack(gap: 0, role: (lines.Count == 0) ? UiRole.Group : UiRole.List, label: "Rules") {
           if (lines.Count == 0) {
             EmptyState("No rules yet", body: $"Add one for the work that always follows the same event — tag it, set it, tell somebody.");
           }
