@@ -4,7 +4,7 @@ using Osysharp.Identity;
 using Osysharp.Automations;
 using AutomationsKitTests;
 
-[TestFixture]
+[TestFixture, DevSeed("A print shop with a manager and two printers")]
 void Shop() {
   var max = new Person { Email = "max@print.test", DisplayName = "Max Berg" };
   new RoleGrant { Member = max, Role = ShopRole.Manager };

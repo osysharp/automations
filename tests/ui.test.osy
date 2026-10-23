@@ -54,6 +54,46 @@ void a_rule_is_written_in_the_editor_when_then() {
   Assert.Equal("bulk", JobOf(flyers).Labels);
 }
 
+// ── ⭐ A STEP TAKES EVERY KIND OF VALUE — a date, a list, a whole number — each in the input its kind takes, and a value
+//    the action cannot read is said when the step is added, not on the record the first time the rule fires.
+[Test(Shop)]
+void a_step_that_takes_a_date_and_a_list_is_set_up_and_what_is_missing_is_said_at_once() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Max);
+  Ui.Visit("/settings/automations");
+  Ui.Click("Add a rule");
+  Ui.Fill("Name", "Big runs wait for paper");
+  Ui.Select("When", On<JobPlaced>());
+  Ui.Click("Add a step");
+  Ui.Select("Does", "AutomationsKitTests.HoldUntil");
+  Ui.Click("Choose");
+  // Three parameters — more than the editor used to offer an action at all.
+  Assert.Visible("Several values, written as a JSON list.");
+  Assert.Visible("A whole number. May be left empty.");
+  // A required value left out is said before the step is kept. (A browser's date input cannot hold "next tuesday" at
+  // all; a date written wrongly by any other road is refused by `Actions.Check` — the logic test proves that half.)
+  Ui.Fill("Reasons", "[\"paper\", \"ink\"]");
+  Ui.Click("Add the step");
+  Assert.Visible("Choose until for “Hold it”.");
+  Ui.Fill("Until", "2026-11-02");
+  Ui.Fill("Reasons", "paper");
+  Ui.Click("Add the step");
+  Assert.Visible("Reasons is not written as it should be");
+  Ui.Fill("Reasons", "[\"paper\", \"ink\"]");
+  Ui.Click("Add the step");
+  Assert.Visible("Hold it: “2026-11-02”, “paper, ink”");
+  Ui.Shot("editor-typed-step-wide-light");
+  Ui.Click("Save");
+  Assert.Visible("“Big runs wait for paper” saved.");
+  // …and it runs, with the date and the list read as the action's own.
+  var flyers = Place("flyers", copies: 50);
+  runas (Max) {
+    var job = Job.Single(x => x.Id == flyers);
+    Assert.Equal(new DateOnly(2026, 11, 2), job.HeldUntil);
+    Assert.Equal("paper, ink", job.HeldFor);
+  }
+}
+
 [Test(Shop)]
 void the_apps_rule_is_copied_for_the_team_and_for_one_printer_locked_and_restored() {
   Ui.Viewport(1440, 900);

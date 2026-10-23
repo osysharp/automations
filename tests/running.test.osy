@@ -169,3 +169,23 @@ void a_shipped_step_reads_as_its_action_and_values() {
   Assert.Equal("AutomationsKitTests.UsePaper", step.Action);
   Assert.Equal("paper=Gloss", string.Join(",", step.Values.Select(v => v.Parameter + "=" + v.Value)));
 }
+
+// ── ⭐ A STEP'S VALUES ARE READ AS THE RUN WILL READ THEM, before the step is kept — a date, a list, a whole number, and
+//    a required one left out, each said in words naming the parameter. They used to be kept as typed and refused on
+//    the job the first time the rule fired.
+[Test(Shop)]
+void a_steps_values_are_read_as_the_run_will_read_them_before_it_is_kept() {
+  var hold = Actions.Of(HoldUntil).Name;
+  var until = new ActionValue { Parameter = "until", Value = "2026-11-02" };
+  var reasons = new ActionValue { Parameter = "reasons", Value = "[\"paper\", \"ink\"]" };
+  Assert.Equal("Until is a date, written 2026-09-04 — “next tuesday” is not.",
+    StepValuesProblem(hold, [new ActionValue { Parameter = "until", Value = "next tuesday" }, reasons]));
+  Assert.Contains("Reasons is not written as it should be",
+    StepValuesProblem(hold, [until, new ActionValue { Parameter = "reasons", Value = "paper" }]));
+  Assert.Equal("Days of grace is a whole number — “two” is not.",
+    StepValuesProblem(hold, [until, reasons, new ActionValue { Parameter = "grace", Value = "two" }]));
+  Assert.Equal("Choose reasons for “Hold it”.", StepValuesProblem(hold, [until]));
+  // …and what WILL run is accepted — the optional one left out, or given.
+  Assert.Equal("", StepValuesProblem(hold, [until, reasons]));
+  Assert.Equal("", StepValuesProblem(hold, [until, reasons, new ActionValue { Parameter = "grace", Value = "2" }]));
+}

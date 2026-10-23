@@ -279,9 +279,17 @@ public string StepWords(ActionInfo info, List<ActionValue> values) {
       var picked = Actions.Choices(info.Name, p.Name).FirstOrDefault(c => c.Key == v.Value);
       said.Add(picked != null ? picked.Label : v.Value);
     } else if (p.Kind == ActionParameterKind.YesNo) { said.Add(v.Value == "true" ? "yes" : "no"); }
+    else if (p.Kind == ActionParameterKind.Sequence) { said.Add("“" + ListWords(v.Value) + "”"); }
     else { said.Add("“" + v.Value + "”"); }
   }
   return said.Count == 0 ? info.Label : info.Label + ": " + string.Join(", ", said);
+}
+
+/// A list written as JSON, as a person reads it — `["paper", "ink"]` is "paper, ink". A list of anything but words
+/// stays as written.
+public string ListWords(string json) {
+  try { return string.Join(", ", JsonSerializer.Deserialize<List<string>>(json)); }
+  catch (Exception e) { return json; }
 }
 
 /// "Status is Waiting", "Hours in its status is at least 24" — a condition as a person reads it.
@@ -357,6 +365,10 @@ public string RuleProblem(AutomationSubjectBase subject, string when, bool hourl
         return $"“{v.Value}” is not one of the choices for {p.Label.ToLower()}.";
       }
     }
+    // …and every value read as the step will read it when the rule fires — a number, a date, a duration, the
+    // details of a structure and the items of a list alike.
+    var unreadable = Actions.Check(s.Action, s.Values.Where(x => x.Value != "").ToList());
+    if (unreadable != "") { return unreadable; }
   }
   return "";
 }
@@ -390,3 +402,7 @@ bool IsNumber(string s) {
 public string Fingerprint(AutomationDefault d) {
   return Crypto.Sha256Hex(JsonSerializer.Serialize(d));
 }
+
+/// Why a step's values cannot run as written — "" when they can, read exactly as the run will read them
+/// (`Actions.Check`). What the editor asks before it keeps a step.
+public string StepValuesProblem(string action, List<ActionValue> values) { return Actions.Check(action, values); }

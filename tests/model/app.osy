@@ -45,6 +45,9 @@ entity Job {
   /// Who is printing it — a printer's own rules run on their jobs.
   Person? Operator;
   [MaxLength(300)] string Labels = "";
+  /// Held back until this day, and why — set by `HoldUntil`, an action that takes a date and a list.
+  DateOnly? HeldUntil;
+  [MaxLength(300)] string HeldFor = "";
   /// What the job cost the shop — the manager's to read, so a printer's rule never asks it.
   decimal Cost;
   /// The shop's own bookkeeping — no rule asks it.
@@ -154,6 +157,15 @@ public void AddLabel(Job job, [Label("Label")] string label) {
   if (clean == "") { throw new ValidationException("A label needs a word."); }
   if (!(" " + job.Labels + " ").Contains(" " + clean + " ")) { job.Labels = (job.Labels + " " + clean).Trim(); }
   UnitOfWork.Commit();
+}
+
+/// Hold a job back until a day, saying why — a date and a list, the kinds a rule's step used to take as blind text.
+[Action("Hold it")]
+public string HoldUntil(Job job, [Label("Until")] DateOnly until, [Label("Reasons")] List<string> reasons, [Label("Days of grace")] int grace = 0) {
+  job.HeldUntil = until.AddDays(grace);
+  job.HeldFor = string.Join(", ", reasons);
+  UnitOfWork.Commit();
+  return "Held until " + job.HeldUntil.Value.ToString("yyyy-MM-dd") + ".";
 }
 
 /// The printers a job may be given to — whoever prints here, by name.

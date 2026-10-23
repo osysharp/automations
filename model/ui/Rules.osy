@@ -56,11 +56,10 @@ public component AutomationRules(string subject = "") {
   // a step being added
   bool addingStep = false;
   string stepAction = "";
-  List<ActionParameter> stepParams = [];
-  List<ActionChoice> firstChoices = [];
-  List<ActionChoice> secondChoices = [];
-  string firstValue = "";
-  string secondValue = "";
+  // ⭐ ONE DRAFT PER PARAMETER, however many the action takes — each box binds `stepDrafts[i].Value` (a list element
+  //   is a two-way target). It held two (`firstValue`, `secondValue`), so an action with three parameters was not
+  //   offered at all.
+  StepParamDraft[] stepDrafts = [];
 
   on mount { Load(); }
 
@@ -74,7 +73,7 @@ public component AutomationRules(string subject = "") {
     keys.Add("@hourly");
     whenKeys = keys;
     conditions = ConditionChoices(key);
-    actions = StepChoices(key).Where(a => a.Parameters.Count(p => !p.Subject) <= 2).ToList();
+    actions = StepChoices(key);
     manager = KeepsTeamRules();
   }
 
@@ -110,20 +109,16 @@ public component AutomationRules(string subject = "") {
   }
   action DropTest(int i) { var next = tests.ToList(); next.RemoveAt(i); tests = next; Reword(); }
 
-  action StartStep() { addingStep = !addingStep; stepAction = ""; stepParams = []; firstValue = ""; secondValue = ""; }
-  action PickAction() {
-    var info = actions.FirstOrDefault(a => a.Name == stepAction);
-    stepParams = info == null ? [] : info!.Parameters.Where(p => !p.Subject).ToList();
-    firstChoices = stepParams.Count > 0 ? ChoicesOf(stepAction, stepParams[0]) : [];
-    secondChoices = stepParams.Count > 1 ? ChoicesOf(stepAction, stepParams[1]) : [];
-    firstValue = firstChoices.Count > 0 ? firstChoices[0].Key : "";
-    secondValue = secondChoices.Count > 0 ? secondChoices[0].Key : "";
-  }
+  action StartStep() { addingStep = !addingStep; stepAction = ""; stepDrafts = []; }
+  action PickAction() { stepDrafts = StepDraftsFor(actions.FirstOrDefault(a => a.Name == stepAction)).ToArray(); }
   action AddStep() {
     if (stepAction == "") { problem = "Choose what it does."; return; }
-    List<ActionValue> values = [];
-    if (stepParams.Count > 0) { values.Add(new ActionValue { Parameter = stepParams[0].Name, Value = firstValue }); }
-    if (stepParams.Count > 1) { values.Add(new ActionValue { Parameter = stepParams[1].Name, Value = secondValue }); }
+    var values = StepValuesOf(stepDrafts.ToList());
+    // ⛔ CHECKED AS IT WILL RUN, BEFORE IT IS KEPT. A date typed as "next tuesday" used to be saved, and refused on
+    //    the record the first time the rule fired — where nobody who could fix it was looking.
+    var wrong = StepValuesProblem(stepAction, values);
+    if (wrong != "") { problem = wrong; return; }
+    problem = "";
     var next = steps.ToList();
     next.Add(new AutomationStepSpec { Action = stepAction, Values = values });
     steps = next;
@@ -290,8 +285,9 @@ public component AutomationRules(string subject = "") {
             Card {
               Dropdown("Does", value: stepAction, options: actions.Select(a => a.Name).ToArray(), placeholder: "Choose…") { k => Text(ActionLabel(k)); }
               Row(gap: 2) { Button("Choose", onPress: PickAction, tone: Tone.Ghost, size: Size.Sm); }
-              if (stepParams.Count > 0) { ParamInput(stepParams[0], firstChoices, firstValue); }
-              if (stepParams.Count > 1) { ParamInput(stepParams[1], secondChoices, secondValue); }
+              foreach (var i in Enumerable.Range(0, stepDrafts.Length)) {
+                ParamInput(stepDrafts[i].Parameter, stepDrafts[i].Choices, stepDrafts[i].Value);
+              }
               Row(gap: 2) {
                 Button("Add the step", onPress: AddStep, tone: Tone.Primary, size: Size.Sm);
                 Button("Cancel", onPress: StartStep, tone: Tone.Ghost, size: Size.Sm);
@@ -363,21 +359,39 @@ component RuleRow(RuleLine line, bool manager, Action onOpen, Action onCopyForTe
   }
 }
 
-/// One parameter of a step being added — a choice from what it offers, words, a number, yes or no.
+/// One parameter of a step being added, as the input its kind takes — the Ui kit's `ActionArgumentField`, which has
+/// one for every `ActionParameterKind`. It knew choices and yes-or-no and gave everything else one line of text, so a
+/// date, a duration or a list of tags was typed blind and refused only when the rule fired.
 component ParamInput(ActionParameter p, List<ActionChoice> choices, Binding<string> value) {
-  string Words(string k) {
-    var c = choices.FirstOrDefault(x => x.Key == k);
-    return c == null ? k : c!.Label;
+  render { ActionArgumentField(p, choices, value); }
+}
+
+/// One parameter of a step being written: what it is, what it offers, and what has been given so far.
+public class StepParamDraft {
+  public ActionParameter Parameter;
+  public List<ActionChoice> Choices = [];
+  public string Value = "";
+}
+
+/// A draft per parameter of `info` (the subject is the record the rule fires on, never asked), a choice preselected.
+public List<StepParamDraft> StepDraftsFor(ActionInfo? info) {
+  List<StepParamDraft> drafts = [];
+  if (info == null) { return drafts; }
+  foreach (var p in info!.Parameters.Where(x => !x.Subject)) {
+    var choices = ChoicesOf(info.Name, p);
+    drafts.Add(new StepParamDraft { Parameter = p, Choices = choices, Value = choices.Count > 0 && !p.Optional ? choices[0].Key : "" });
   }
-  render {
-    if (choices.Count > 0) {
-      Dropdown(p.Label, value: value, options: choices.Select(c => c.Key).ToArray()) { k => Text(Words(k)); }
-    } else if (p.Kind == ActionParameterKind.YesNo) {
-      Dropdown(p.Label, value: value, options: ["true", "false"]) { k => Text(k == "true" ? "Yes" : "No"); }
-    } else {
-      Field(p.Label, value: value);
-    }
+  return drafts;
+}
+
+/// The values a step keeps: one per parameter given — a parameter left empty is left out, so an optional one takes its
+/// own default rather than an empty value it cannot read.
+public List<ActionValue> StepValuesOf(List<StepParamDraft> drafts) {
+  List<ActionValue> values = [];
+  foreach (var d in drafts) {
+    if (d.Value.Trim() != "") { values.Add(new ActionValue { Parameter = d.Parameter.Name, Value = d.Value.Trim() }); }
   }
+  return values;
 }
 
 /// The choices one parameter offers the reader — an enum's members, or what its `[Choices]` function answers for them.
